@@ -1,0 +1,25 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot'
+    id 'io.spring.dependency-management'
+}
+
+group = 'de.tum.cit.artemis.push'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    implementation(project(":common"))
+    implementation(project(":apns"))
+    implementation(project(":firebase"))
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

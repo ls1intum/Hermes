@@ -1,0 +1,28 @@
+plugins {
+    id 'java'
+    id 'org.springframework.boot'
+    id 'io.spring.dependency-management'
+}
+
+group = 'de.tum.cit.artemis.push.artemispushnotificationrelay'
+version = '0.0.1-SNAPSHOT'
+sourceCompatibility = '17'
+
+repositories {
+    mavenCentral()
+}
+
+dependencies {
+    implementation 'org.springframework.boot:spring-boot-starter'
+    implementation 'org.springframework.boot:spring-boot-starter-web'
+
+    implementation 'com.eatthepath:pushy:0.15.2'
+
+    implementation 'javax.annotation:javax.annotation-api:1.3.2'
+
+    implementation(project(":common"))
+}
+
+tasks.named('test') {
+    useJUnitPlatform()
+}

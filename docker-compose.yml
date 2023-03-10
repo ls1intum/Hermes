@@ -1,0 +1,19 @@
+version: '3'
+services:
+  hermes:
+    # either build image with run.sh before running or adapt image to point to Docker Hub: e.g. sven0311tum/hermes:latest
+    image: hermes
+    container_name: hermes
+    ports:
+      - "17333:8080"
+    environment:
+      - APNS_CERTIFICATE_PATH=/key/artemis-apns.p12
+      # adapt the following line
+      - APNS_CERTIFICATE_PWD=<pwd_for_certificate>
+      - APNS_PROD_ENVIRONMENT=false
+      - GOOGLE_APPLICATION_CREDENTIALS=/firebase.json
+    volumes:
+      # adapt the following lines
+      - <path_to_apns_certificate>:/key/artemis-apns.p12
+      - <path_to_google_credentials_json>:/firebase.json
+    restart: on-failure
