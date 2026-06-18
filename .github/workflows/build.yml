@@ -9,3 +9,8 @@ on:
 jobs:
   build-and-push-docker-image:
     uses: ls1intum/.github/.github/workflows/build-and-push-docker-image.yml@main
+    with:
+      # Docker requires lowercase repository names; the workflow defaults to the repo name
+      # "ls1intum/Hermes" (capital H), which is an invalid tag. Pin the lowercase image name
+      # (matches the image referenced in docker-compose.yml).
+      image-name: ls1intum/hermes
