@@ -20,7 +20,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'org.springframework.boot:spring-boot-starter-web'
 
-    implementation 'com.eatthepath:pushy:0.15.4'
+    implementation 'com.eatthepath:pushy:0.15.6'
 
     implementation(project(":common"))
 }
