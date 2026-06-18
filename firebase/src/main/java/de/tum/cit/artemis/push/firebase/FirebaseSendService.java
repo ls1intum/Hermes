@@ -24,11 +24,22 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
 
     private static final Logger log = LoggerFactory.getLogger(FirebaseSendService.class);
 
-    private Optional<FirebaseApp> firebaseApp = Optional.empty();
+    private final Optional<FirebaseApp> firebaseApp;
 
     private boolean isConnected;
 
     public FirebaseSendService() {
+        this(loadDefaultFirebaseApp());
+    }
+
+    // Visible for testing: allows injecting a FirebaseApp backed by a mock HTTP transport
+    // so the full send path can be exercised against a faked FCM gateway.
+    FirebaseSendService(Optional<FirebaseApp> firebaseApp) {
+        this.firebaseApp = firebaseApp;
+        this.isConnected = firebaseApp.isPresent();
+    }
+
+    private static Optional<FirebaseApp> loadDefaultFirebaseApp() {
         try {
             FirebaseOptions options = FirebaseOptions
                     .builder()
@@ -36,12 +47,10 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
                     .setCredentials(GoogleCredentials.getApplicationDefault())
                     .build();
 
-            firebaseApp = Optional.of(FirebaseApp.initializeApp(options));
-
-            isConnected = true;
+            return Optional.of(FirebaseApp.initializeApp(options));
         } catch (IOException e) {
             log.error("Exception while loading Firebase credentials", e);
-            isConnected = false;
+            return Optional.empty();
         }
     }
 
@@ -69,10 +78,11 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
                 FirebaseMessaging.getInstance(firebaseApp.get()).sendEach(batch);
                 isConnected = true;
             } catch (FirebaseMessagingException e) {
-                // In case the certificate is invalid, the THIRD_PARTY_AUTH_ERROR error code will be returned
-                var errorCodes = List.of(MessagingErrorCode.THIRD_PARTY_AUTH_ERROR);
-
-                if(errorCodes.contains(e.getMessagingErrorCode())) {
+                log.error("Failed to send push notifications via Firebase", e);
+                // In case the certificate is invalid, the THIRD_PARTY_AUTH_ERROR error code will be returned.
+                // Note: getMessagingErrorCode() can be null, so compare with == rather than List#contains,
+                // which throws a NullPointerException for null arguments on immutable lists.
+                if (e.getMessagingErrorCode() == MessagingErrorCode.THIRD_PARTY_AUTH_ERROR) {
                     isConnected = false;
                 }
 

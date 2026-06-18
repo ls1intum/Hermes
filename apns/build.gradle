@@ -23,6 +23,11 @@ dependencies {
     implementation 'com.eatthepath:pushy:0.15.6'
 
     implementation(project(":common"))
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
+    // Lets Netty's SelfSignedCertificate generate the mock APNS server's TLS material at runtime,
+    // so no private keys need to be committed to the repository.
+    testImplementation 'org.bouncycastle:bcpkix-jdk18on:1.84'
 }
 
 tasks.named('test') {

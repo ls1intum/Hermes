@@ -28,6 +28,8 @@ dependencies {
     implementation "com.google.protobuf:protobuf-java-util:4.35.1"
 
     implementation(project(":common"))
+
+    testImplementation 'org.springframework.boot:spring-boot-starter-test'
 }
 
 tasks.named('test') {

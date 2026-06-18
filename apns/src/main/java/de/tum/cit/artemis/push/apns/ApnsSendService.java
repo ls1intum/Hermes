@@ -1,7 +1,6 @@
 package de.tum.cit.artemis.push.apns;
 
 import com.eatthepath.pushy.apns.*;
-import com.eatthepath.pushy.apns.server.RejectionReason;
 import com.eatthepath.pushy.apns.util.SimpleApnsPayloadBuilder;
 import com.eatthepath.pushy.apns.util.SimpleApnsPushNotification;
 import com.eatthepath.pushy.apns.util.concurrent.PushNotificationFuture;
@@ -38,6 +37,17 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     @Value("${APNS_PROD_ENVIRONMENT: #{false}}")
     private Boolean apnsProdEnvironment = false;
 
+    // Optional overrides used to point the client at a mock APNS gateway in tests.
+    // In production these stay unset and the real Apple hosts (port 443) are used.
+    @Value("${APNS_SERVER_HOST:#{null}}")
+    private String apnsServerHost;
+
+    @Value("${APNS_SERVER_PORT:443}")
+    private int apnsServerPort;
+
+    @Value("${APNS_TRUSTED_CERT_PATH:#{null}}")
+    private String apnsTrustedCertPath;
+
     private ApnsClient apnsClient;
 
     private boolean isConnected;
@@ -52,10 +62,15 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             return;
         }
         try {
-            apnsClient = new ApnsClientBuilder()
-                    .setApnsServer(apnsProdEnvironment ? ApnsClientBuilder.PRODUCTION_APNS_HOST : ApnsClientBuilder.DEVELOPMENT_APNS_HOST)
-                    .setClientCredentials(new File(apnsCertificatePath), apnsCertificatePwd)
-                    .build();
+            String apnsHost = apnsServerHost != null ? apnsServerHost
+                    : (apnsProdEnvironment ? ApnsClientBuilder.PRODUCTION_APNS_HOST : ApnsClientBuilder.DEVELOPMENT_APNS_HOST);
+            ApnsClientBuilder clientBuilder = new ApnsClientBuilder()
+                    .setApnsServer(apnsHost, apnsServerPort)
+                    .setClientCredentials(new File(apnsCertificatePath), apnsCertificatePwd);
+            if (apnsTrustedCertPath != null) {
+                clientBuilder.setTrustedServerCertificateChain(new File(apnsTrustedCertPath));
+            }
+            apnsClient = clientBuilder.build();
             isConnected = true;
             log.info("Started APNS client successfully!");
         } catch (IOException e) {
@@ -103,8 +118,10 @@ public class ApnsSendService implements SendService<NotificationRequest> {
                 isConnected = true;
                 return ResponseEntity.ok().build();
             } else {
-                var rejectionReasons = List.of(RejectionReason.BAD_CERTIFICATE.toString(), RejectionReason.BAD_CERTIFICATE_ENVIRONMENT.toString());
-                if(pushNotificationResponse.getRejectionReason().isPresent() && rejectionReasons.contains(pushNotificationResponse.getRejectionReason().get())) {
+                // APNS reports rejection reasons using Apple's documented phrases (e.g. "BadCertificate"),
+                // which is exactly what getRejectionReason() returns -- not the RejectionReason enum name.
+                var certificateRejectionReasons = List.of("BadCertificate", "BadCertificateEnvironment");
+                if (pushNotificationResponse.getRejectionReason().isPresent() && certificateRejectionReasons.contains(pushNotificationResponse.getRejectionReason().get())) {
                     isConnected = false;
                 }
                 log.error("Notification rejected by the APNs gateway: {}", pushNotificationResponse.getRejectionReason());
