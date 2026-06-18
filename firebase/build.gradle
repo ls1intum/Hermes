@@ -8,8 +8,8 @@ group = 'de.tum.cit.aet.artemis.push'
 version = '1.0.0'
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
 }
 
 repositories {
@@ -20,12 +20,12 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'org.springframework.boot:spring-boot-starter-web'
 
-    implementation "com.google.firebase:firebase-admin:9.4.2"
+    implementation "com.google.firebase:firebase-admin:9.9.0"
 
     // use the latest version to avoid security vulnerabilities
     // TODO: I don't think we need this dependency, we could also try to exclude it
-    implementation "com.google.protobuf:protobuf-java:4.29.2"
-    implementation "com.google.protobuf:protobuf-java-util:4.29.2"
+    implementation "com.google.protobuf:protobuf-java:4.35.1"
+    implementation "com.google.protobuf:protobuf-java-util:4.35.1"
 
     implementation(project(":common"))
 }

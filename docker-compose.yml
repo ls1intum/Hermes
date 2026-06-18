@@ -1,4 +1,3 @@
-version: '3'
 services:
   hermes:
     image: ghcr.io/ls1intum/hermes:latest

@@ -8,8 +8,8 @@ group = 'de.tum.cit.aet.artemis.push'
 version = '1.0.0'
 
 java {
-    sourceCompatibility = JavaVersion.VERSION_21
-    targetCompatibility = JavaVersion.VERSION_21
+    sourceCompatibility = JavaVersion.VERSION_25
+    targetCompatibility = JavaVersion.VERSION_25
 }
 
 repositories {
@@ -20,7 +20,7 @@ dependencies {
     implementation 'org.springframework.boot:spring-boot-starter'
     implementation 'org.springframework.boot:spring-boot-starter-web'
 
-    implementation 'com.eatthepath:pushy:0.15.4'
+    implementation 'com.eatthepath:pushy:0.15.6'
 
     implementation(project(":common"))
 }
