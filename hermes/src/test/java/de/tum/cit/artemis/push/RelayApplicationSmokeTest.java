@@ -16,6 +16,8 @@ import org.springframework.http.MediaType;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.context.bean.override.mockito.MockitoBean;
 import org.springframework.test.web.servlet.MockMvc;
+import org.springframework.test.web.servlet.MvcResult;
+import org.springframework.web.context.request.async.DeferredResult;
 
 import java.util.List;
 
@@ -24,6 +26,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.post;
 import static org.springframework.test.web.servlet.result.MockMvcResultMatchers.jsonPath;
@@ -76,13 +79,16 @@ class RelayApplicationSmokeTest {
 
     @Test
     void sendApnsDeserializesRequestAndDelegatesToApnsService() throws Exception {
-        when(apnsSendService.send(any())).thenReturn(ResponseEntity.ok().build());
+        when(apnsSendService.send(any())).thenReturn(deferred(HttpStatus.OK));
         String body = """
                 {"initializationVector":"iv","payloadCipherText":"cipher","token":"token-1","apiType":"IOS_V2"}""";
 
-        mockMvc.perform(post("/api/push_notification/send_apns")
+        // The endpoint returns a DeferredResult, so the response is produced via an async dispatch.
+        MvcResult mvcResult = mockMvc.perform(post("/api/push_notification/send_apns")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
+                .andReturn();
+        mockMvc.perform(asyncDispatch(mvcResult))
                 .andExpect(status().isOk());
 
         ArgumentCaptor<NotificationRequest> captor = ArgumentCaptor.forClass(NotificationRequest.class);
@@ -95,28 +101,32 @@ class RelayApplicationSmokeTest {
 
     @Test
     void sendApnsPropagatesServiceErrorStatus() throws Exception {
-        when(apnsSendService.send(any())).thenReturn(ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).build());
+        when(apnsSendService.send(any())).thenReturn(deferred(HttpStatus.EXPECTATION_FAILED));
         String body = """
                 {"initializationVector":"iv","payloadCipherText":"cipher","token":"token","apiType":"DEFAULT"}""";
 
-        mockMvc.perform(post("/api/push_notification/send_apns")
+        MvcResult mvcResult = mockMvc.perform(post("/api/push_notification/send_apns")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
+                .andReturn();
+        mockMvc.perform(asyncDispatch(mvcResult))
                 .andExpect(status().isExpectationFailed());
     }
 
     @Test
     void sendFirebaseDeserializesBatchAndDelegatesToFirebaseService() throws Exception {
-        when(firebaseSendService.send(anyList())).thenReturn(ResponseEntity.ok().build());
+        when(firebaseSendService.send(anyList())).thenReturn(deferred(HttpStatus.OK));
         String body = """
                 {"notificationRequest":[
                   {"initializationVector":"iv1","payloadCipherText":"c1","token":"t1","apiType":"DEFAULT"},
                   {"initializationVector":"iv2","payloadCipherText":"c2","token":"t2","apiType":"IOS_V2"}
                 ]}""";
 
-        mockMvc.perform(post("/api/push_notification/send_firebase")
+        MvcResult mvcResult = mockMvc.perform(post("/api/push_notification/send_firebase")
                         .contentType(MediaType.APPLICATION_JSON)
                         .content(body))
+                .andReturn();
+        mockMvc.perform(asyncDispatch(mvcResult))
                 .andExpect(status().isOk());
 
         @SuppressWarnings("unchecked")
@@ -125,5 +135,12 @@ class RelayApplicationSmokeTest {
         assertThat(captor.getValue()).hasSize(2);
         assertThat(captor.getValue().get(0).token()).isEqualTo("t1");
         assertThat(captor.getValue().get(1).apiType()).isEqualTo(PushNotificationApiType.IOS_V2);
+    }
+
+    /** Builds an already-completed DeferredResult, mirroring what the (now asynchronous) send services return. */
+    private static DeferredResult<ResponseEntity<Void>> deferred(HttpStatus status) {
+        DeferredResult<ResponseEntity<Void>> result = new DeferredResult<>();
+        result.setResult(ResponseEntity.status(status).build());
+        return result;
     }
 }

@@ -30,6 +30,8 @@ import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.security.KeyStore;
 import java.security.cert.Certificate;
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 
 import static org.assertj.core.api.Assertions.assertThat;
 
@@ -97,9 +99,18 @@ class ApnsSendServiceTest {
         ReflectionTestUtils.setField(service, "apnsServerHost", "localhost");
         ReflectionTestUtils.setField(service, "apnsServerPort", port);
         ReflectionTestUtils.setField(service, "apnsTrustedCertPath", serverCertificate.certificate().getAbsolutePath());
+        applyExecutorConfig(service);
 
         service.applicationReady();
         assertThat(service.isHealthy()).as("client should initialise successfully").isTrue();
+    }
+
+    /** Supplies the bounded-executor settings that Spring would normally inject from @Value defaults. */
+    private static void applyExecutorConfig(ApnsSendService service) {
+        ReflectionTestUtils.setField(service, "workers", 4);
+        ReflectionTestUtils.setField(service, "queueCapacity", 100);
+        ReflectionTestUtils.setField(service, "responseTimeoutMs", 30_000L);
+        ReflectionTestUtils.setField(service, "connectionTimeoutMs", 2_000L);
     }
 
     /** Packages the generated client certificate and key into a temporary PKCS#12 keystore. */
@@ -128,7 +139,7 @@ class ApnsSendServiceTest {
     void sendsV2NotificationAsAlertWithEncryptedPayload() {
         NotificationRequest request = new NotificationRequest("iv-123", "cipher-abc", "device-token-1", PushNotificationApiType.IOS_V2);
 
-        ResponseEntity<Void> response = service.send(request);
+        ResponseEntity<Void> response = service.doSend(request);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(service.isHealthy()).isTrue();
@@ -145,7 +156,7 @@ class ApnsSendServiceTest {
     void sendsDefaultNotificationAsBackgroundContentAvailable() {
         NotificationRequest request = new NotificationRequest("iv-9", "cipher-9", "device-token-2", PushNotificationApiType.DEFAULT);
 
-        ResponseEntity<Void> response = service.send(request);
+        ResponseEntity<Void> response = service.doSend(request);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(header("apns-push-type")).isEqualToIgnoringCase("background");
@@ -159,7 +170,7 @@ class ApnsSendServiceTest {
     void rejectedNotificationReturnsExpectationFailedButStaysHealthy() {
         handlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
 
-        ResponseEntity<Void> response = service.send(new NotificationRequest("iv", "p", "bad-token", PushNotificationApiType.IOS_V2));
+        ResponseEntity<Void> response = service.doSend(new NotificationRequest("iv", "p", "bad-token", PushNotificationApiType.IOS_V2));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
         // A bad device token is not a certificate problem, so the gateway is still considered healthy.
@@ -170,10 +181,54 @@ class ApnsSendServiceTest {
     void badCertificateEnvironmentRejectionMarksServiceUnhealthy() {
         handlerFactory.rejectWith = RejectionReason.BAD_CERTIFICATE_ENVIRONMENT;
 
-        ResponseEntity<Void> response = service.send(new NotificationRequest("iv", "p", "token", PushNotificationApiType.IOS_V2));
+        ResponseEntity<Void> response = service.doSend(new NotificationRequest("iv", "p", "token", PushNotificationApiType.IOS_V2));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
         assertThat(service.isHealthy()).as("a certificate/environment rejection must flag the gateway as unhealthy").isFalse();
+    }
+
+    @Test
+    void reportsUnhealthyOnceTheLoadedCertificateIsExpired() {
+        // The service initialised healthy against a valid certificate ...
+        assertThat(service.isHealthy()).isTrue();
+
+        // ... but the moment the loaded certificate is past its expiry, health must report unhealthy immediately,
+        // even without any failing send (this is the proactive expired-certificate detection).
+        ReflectionTestUtils.setField(service, "loadedCertificateExpiry", Instant.now().minus(1, ChronoUnit.MINUTES));
+
+        assertThat(service.isHealthy()).isFalse();
+    }
+
+    @Test
+    void handshakeFailureMarksServiceUnhealthy() throws Exception {
+        // An expired/invalid client certificate fails the TLS handshake, which pushy surfaces as an
+        // ExecutionException on the send. We reproduce a handshake failure deterministically by pointing a fresh
+        // service at the real mock server but trusting the WRONG server certificate, so the TLS handshake is
+        // rejected. The send must fail and flip health to unhealthy (the bug the original code missed: it only
+        // checked rejection reasons and never the handshake/connection failure path).
+        ApnsSendService failing = new ApnsSendService();
+        ReflectionTestUtils.setField(failing, "apnsCertificatePath", clientKeyStoreFile.getAbsolutePath());
+        ReflectionTestUtils.setField(failing, "apnsCertificatePwd", P12_PASSWORD);
+        ReflectionTestUtils.setField(failing, "apnsProdEnvironment", false);
+        ReflectionTestUtils.setField(failing, "apnsServerHost", "localhost");
+        ReflectionTestUtils.setField(failing, "apnsServerPort", port);
+        // Trust the client's own certificate instead of the server's — the server's certificate will not be trusted.
+        ReflectionTestUtils.setField(failing, "apnsTrustedCertPath", clientCertificate.certificate().getAbsolutePath());
+        applyExecutorConfig(failing);
+        failing.applicationReady();
+
+        try {
+            ResponseEntity<Void> response = failing.doSend(new NotificationRequest("iv", "p", "token", PushNotificationApiType.IOS_V2));
+
+            assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
+            assertThat(failing.isHealthy()).as("a connection/handshake failure must flag the gateway as unhealthy").isFalse();
+        }
+        finally {
+            Object client = ReflectionTestUtils.getField(failing, "apnsClient");
+            if (client instanceof ApnsClient apnsClient) {
+                apnsClient.close();
+            }
+        }
     }
 
     private static String header(String name) {

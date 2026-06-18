@@ -15,6 +15,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.web.context.request.async.DeferredResult;
 
 import java.io.IOException;
 import java.util.ArrayList;
@@ -56,7 +57,7 @@ class FirebaseSendServiceTest {
                 new NotificationRequest("iv-1", "cipher-1", "token-1", PushNotificationApiType.DEFAULT),
                 new NotificationRequest("iv-2", "cipher-2", "token-2", PushNotificationApiType.IOS_V2));
 
-        ResponseEntity<Void> response = service.send(requests);
+        ResponseEntity<Void> response = service.doSend(requests);
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(service.isHealthy()).isTrue();
@@ -72,7 +73,7 @@ class FirebaseSendServiceTest {
         RecordingTransport transport = RecordingTransport.respondingWith(200, FCM_SUCCESS_BODY);
         FirebaseSendService service = serviceWith(transport);
 
-        ResponseEntity<Void> response = service.send(requests(501));
+        ResponseEntity<Void> response = body(service.send(requests(501)));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.BAD_REQUEST);
         assertThat(transport.urls).as("oversized batch must be rejected before any HTTP call").isEmpty();
@@ -89,7 +90,7 @@ class FirebaseSendServiceTest {
         RecordingTransport transport = RecordingTransport.respondingWith(401, authError);
         FirebaseSendService service = serviceWith(transport);
 
-        ResponseEntity<Void> response = service.send(requests(2));
+        ResponseEntity<Void> response = service.doSend(requests(2));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
         assertThat(transport.urls).as("FCM should have been contacted for the batch").isNotEmpty();
@@ -99,7 +100,7 @@ class FirebaseSendServiceTest {
     void isANoOpWhenNoFirebaseCredentialsArePresent() {
         FirebaseSendService service = new FirebaseSendService(Optional.empty());
 
-        ResponseEntity<Void> response = service.send(requests(3));
+        ResponseEntity<Void> response = body(service.send(requests(3)));
 
         assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
         assertThat(service.isHealthy()).isFalse();
@@ -115,6 +116,13 @@ class FirebaseSendServiceTest {
                 .build();
         app = FirebaseApp.initializeApp(options, "fcm-test-" + APP_COUNTER.incrementAndGet());
         return new FirebaseSendService(Optional.of(app));
+    }
+
+    /** Extracts the response from a DeferredResult that the service completed synchronously (size/no-op paths). */
+    @SuppressWarnings("unchecked")
+    private static ResponseEntity<Void> body(DeferredResult<ResponseEntity<Void>> deferred) {
+        assertThat(deferred.hasResult()).as("deferred result should be completed synchronously").isTrue();
+        return (ResponseEntity<Void>) deferred.getResult();
     }
 
     private static List<NotificationRequest> requests(int count) {
