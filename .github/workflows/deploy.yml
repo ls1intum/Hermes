@@ -70,7 +70,7 @@ jobs:
           chmod 600 ~/.ssh/config
 
       - name: Checkout Artemis-Ansible repository
-        uses: actions/checkout@v6
+        uses: actions/checkout@v7
         with:
           repository: 'ls1intum/artemis-ansible'
 
