@@ -1,0 +1,106 @@
+name: Deploy Hermes
+
+# Manual workflow dispatch trigger:
+#  - dropdown to choose the target environment (production / staging)
+#  - required docker tag used as the hermes_version to deploy
+on:
+  workflow_dispatch:
+    inputs:
+      environment_name:
+        description: 'Target environment'
+        type: choice
+        required: true
+        options:
+          - production
+          - staging
+      hermes_version:
+        description: 'Docker tag to deploy (hermes_version)'
+        type: string
+        required: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.environment_name }}
+      url: ${{ vars.VM_HOST }}
+    env:
+      VM_HOST: ${{ vars.VM_HOST }}
+      VM_USERNAME: ${{ vars.VM_USERNAME }}
+
+    steps:
+      - name: Setup SSH
+        env:
+          DEPLOYMENT_SSH_KEY: ${{ secrets.DEPLOYMENT_SSH_KEY }}
+          DEPLOYMENT_GATEWAY_SSH_KEY: ${{ secrets.DEPLOYMENT_GATEWAY_SSH_KEY }}
+          DEPLOYMENT_GATEWAY_HOST: ${{ vars.DEPLOYMENT_GATEWAY_HOST }}
+          DEPLOYMENT_GATEWAY_PORT: ${{ vars.DEPLOYMENT_GATEWAY_PORT }}
+          DEPLOYMENT_GATEWAY_PUBLIC_KEY: ${{ vars.DEPLOYMENT_GATEWAY_PUBLIC_KEY }}
+          DEPLOYMENT_GATEWAY_USER: ${{ vars.DEPLOYMENT_GATEWAY_USER }}
+        run: |
+          mkdir -p ~/.ssh
+          chmod 700 ~/.ssh
+
+          # Write the deployment private key (used to reach the target VM)
+          echo "$DEPLOYMENT_SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+
+          # Write the gateway/bastion private key
+          echo "$DEPLOYMENT_GATEWAY_SSH_KEY" | sed 's/\\n/\n/g' > ~/.ssh/gateway
+          chmod 600 ~/.ssh/gateway
+
+          # Trust the gateway host key to avoid interactive verification
+          echo "$DEPLOYMENT_GATEWAY_PUBLIC_KEY" >> ~/.ssh/known_hosts
+
+          # Route connections to the target VM through the SSH gateway
+          cat > ~/.ssh/config <<EOF
+          Host gateway
+            HostName $DEPLOYMENT_GATEWAY_HOST
+            Port $DEPLOYMENT_GATEWAY_PORT
+            User $DEPLOYMENT_GATEWAY_USER
+            IdentityFile ~/.ssh/gateway
+            StrictHostKeyChecking accept-new
+
+          Host $VM_HOST
+            User $VM_USERNAME
+            IdentityFile ~/.ssh/id_ed25519
+            ProxyJump gateway
+            StrictHostKeyChecking accept-new
+          EOF
+          chmod 600 ~/.ssh/config
+
+      - name: Checkout Artemis-Ansible repository
+        uses: actions/checkout@v6
+        with:
+          repository: 'ls1intum/artemis-ansible'
+
+      - name: Set up Python
+        uses: actions/setup-python@v6
+        with:
+          python-version: '3.14'
+
+      - name: Install Artemis-Ansible dependencies
+        run: |
+          pip3 install -r requirements.txt
+          ansible-galaxy collection install -r requirements.yml --force
+          ansible-galaxy install -r requirements.yml --force
+          ansible-galaxy install -r ~/.ansible/collections/ansible_collections/ls1intum/artemis/requirements.yml
+
+      - name: Deploy Artemis
+        run: |
+          # Select the playbook for the chosen environment
+          if [ "${{ github.event.inputs.environment_name }}" = "production" ]; then
+            PLAYBOOK="playbooks/hermes/hermes-deploy-prod.yml"
+          else
+            PLAYBOOK="playbooks/hermes/hermes-deploy-staging.yml"
+          fi
+
+          ansible-playbook "$PLAYBOOK" \
+            -e hermes_version="${{ github.event.inputs.hermes_version }}"
+
+      - name: Cleanup
+        if: always()
+        run: |
+          rm -f ~/.ssh/id_ed25519
+          rm -f ~/.ssh/gateway
+          rm -f ~/.ssh/config
