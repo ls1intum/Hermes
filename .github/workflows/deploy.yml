@@ -86,7 +86,7 @@ jobs:
           ansible-galaxy install -r requirements.yml --force
           ansible-galaxy install -r ~/.ansible/collections/ansible_collections/ls1intum/artemis/requirements.yml
 
-      - name: Deploy Artemis
+      - name: Deploy Hermes
         run: |
           # Select the playbook for the chosen environment
           if [ "${{ github.event.inputs.environment_name }}" = "production" ]; then
