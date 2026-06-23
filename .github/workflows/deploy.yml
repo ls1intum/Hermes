@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Setup SSH
         env:
-          DEPLOYMENT_SSH_KEY: ${{ secrets.DEPLOYMENT_SSH_KEY }}
+          DEPLOYMENT_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
           DEPLOYMENT_GATEWAY_SSH_KEY: ${{ secrets.DEPLOYMENT_GATEWAY_SSH_KEY }}
           DEPLOYMENT_GATEWAY_HOST: ${{ vars.DEPLOYMENT_GATEWAY_HOST }}
           DEPLOYMENT_GATEWAY_PORT: ${{ vars.DEPLOYMENT_GATEWAY_PORT }}
@@ -86,7 +86,7 @@ jobs:
           ansible-galaxy install -r requirements.yml --force
           ansible-galaxy install -r ~/.ansible/collections/ansible_collections/ls1intum/artemis/requirements.yml
 
-      - name: Deploy Artemis
+      - name: Deploy Hermes
         run: |
           # Select the playbook for the chosen environment
           if [ "${{ github.event.inputs.environment_name }}" = "production" ]; then
