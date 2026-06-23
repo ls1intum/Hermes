@@ -31,7 +31,7 @@ jobs:
     steps:
       - name: Setup SSH
         env:
-          DEPLOYMENT_SSH_KEY: ${{ secrets.DEPLOYMENT_SSH_KEY }}
+          DEPLOYMENT_SSH_KEY: ${{ secrets.VM_SSH_KEY }}
           DEPLOYMENT_GATEWAY_SSH_KEY: ${{ secrets.DEPLOYMENT_GATEWAY_SSH_KEY }}
           DEPLOYMENT_GATEWAY_HOST: ${{ vars.DEPLOYMENT_GATEWAY_HOST }}
           DEPLOYMENT_GATEWAY_PORT: ${{ vars.DEPLOYMENT_GATEWAY_PORT }}
