@@ -5,11 +5,12 @@ services:
     ports:
       - "17333:8080"
     environment:
-      - APNS_CERTIFICATE_PWD
+      - APNS_TEAM_ID
+      - APNS_KEY_ID
       - APNS_PROD_ENVIRONMENT
-      - APNS_CERTIFICATE_PATH=/key/artemis-apns.p12
+      - APNS_TOKEN_KEY_PATH=/key/artemis-apns.p8
       - GOOGLE_APPLICATION_CREDENTIALS=/firebase.json
     volumes:
-      - ${APNS_CERT_PATH}:/key/artemis-apns.p12
+      - ${APNS_KEY_PATH}:/key/artemis-apns.p8
       - ${GOOGLE_APPLICATION_CREDENTIALS_JSON}:/firebase.json
     restart: on-failure
