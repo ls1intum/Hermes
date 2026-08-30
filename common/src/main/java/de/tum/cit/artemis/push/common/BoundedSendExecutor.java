@@ -19,7 +19,7 @@ import org.springframework.web.context.request.async.DeferredResult;
  * queued at any moment. It is the core of the relay's backpressure strategy.
  *
  * <p>Why this exists: the original relay ran the blocking provider call ({@code apnsClient.sendNotification().get()})
- * directly on the Tomcat request thread. When the provider was unreachable (e.g. an expired APNs certificate),
+ * directly on the Tomcat request thread. When the provider was unreachable or misconfigured,
  * every request thread blocked and the health endpoint — also served by a Tomcat thread — could no longer be
  * answered, so the whole service appeared dead. This dispatcher fixes that by:
  * <ul>

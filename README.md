@@ -20,6 +20,7 @@ To run the services as an APNS relay the following Environment Variables are req
 - APNS_KEY_ID: String - The Key ID of the APNs signing key
 - APNS_PROD_ENVIRONMENT: Bool - True if it should use the Production APNS Server (Default false)
 Furthermore the <APNS_Key>.p8 needs to be mounted into the Docker under the above specified path.
+The provided docker-compose.yml does this for you: it sets APNS_TOKEN_KEY_PATH itself and mounts the key from the host path given in APNS_KEY_PATH (see example.env).
 
 
 To run the services as a Firebase relay the following Environment Variable is required:
