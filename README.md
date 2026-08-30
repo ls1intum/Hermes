@@ -14,11 +14,13 @@ Allows secure and private push notifications from [Artemis](https://github.com/l
 
 ### Further Information on Dockerfile
 
-To run the services as an APNS relay the following Environment Variables are required:
-- APNS_CERTIFICATE_PATH: String - Path to the APNs certificate .p12 file as described [here](https://developer.apple.com/documentation/usernotifications/setting_up_a_remote_notification_server/establishing_a_certificate-based_connection_to_apns)
-- APNS_CERTIFICATE_PWD: String - The APNS certificate password
-- APNS_PROD_ENVIRONMENT: Bool - True if it should use the Production APNS Server (Default false) 
+To run the services as an APNS relay the following Environment Variables are required (token-based authentication, as described [here](https://developer.apple.com/documentation/usernotifications/establishing-a-token-based-connection-to-apns)):
+- APNS_TOKEN_KEY_PATH: String - Path to the APNs signing key (.p8 file) inside the container
+- APNS_TEAM_ID: String - The Apple Developer Team ID that owns the key
+- APNS_KEY_ID: String - The Key ID of the APNs signing key
+- APNS_PROD_ENVIRONMENT: Bool - True if it should use the Production APNS Server (Default false)
 Furthermore the <APNS_Key>.p8 needs to be mounted into the Docker under the above specified path.
+The provided docker-compose.yml does this for you: it sets APNS_TOKEN_KEY_PATH itself and mounts the key from the host path given in APNS_KEY_PATH (see example.env).
 
 
 To run the services as a Firebase relay the following Environment Variable is required:

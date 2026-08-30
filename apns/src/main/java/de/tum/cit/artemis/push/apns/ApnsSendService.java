@@ -1,6 +1,7 @@
 package de.tum.cit.artemis.push.apns;
 
 import com.eatthepath.pushy.apns.*;
+import com.eatthepath.pushy.apns.auth.ApnsSigningKey;
 import com.eatthepath.pushy.apns.util.SimpleApnsPayloadBuilder;
 import com.eatthepath.pushy.apns.util.SimpleApnsPushNotification;
 import com.eatthepath.pushy.apns.util.concurrent.PushNotificationFuture;
@@ -21,6 +22,8 @@ import org.springframework.web.context.request.async.DeferredResult;
 
 import java.io.File;
 import java.io.IOException;
+import java.security.InvalidKeyException;
+import java.security.NoSuchAlgorithmException;
 import java.time.Duration;
 import java.time.Instant;
 import java.util.Set;
@@ -29,14 +32,17 @@ import java.util.concurrent.ExecutionException;
 /**
  * Relays push notifications to Apple Push Notification service (APNs) via the pushy library.
  *
- * <p>Sends run on a {@link BoundedSendExecutor} (a fixed worker pool + bounded queue), never on the Tomcat
- * request thread, so an unreachable APNs (most importantly: an expired client certificate) can never exhaust the
- * servlet thread pool and starve the health endpoint.
+ * <p>Authenticates with a token-based (JWT) connection: pushy signs each request with the APNs ES256 signing key
+ * (the {@code .p8} identified by a Team ID and Key ID) and refreshes the token automatically. There is no client
+ * certificate and therefore no certificate expiry to track.
  *
- * <p>Health contract: the relay is healthy when it is <em>configured</em> (the certificate loaded successfully),
- * the loaded certificate is <em>not past its expiry</em>, and the most recent send (if any) did not reveal a
- * provider/credential problem. Reading health never performs I/O — the certificate expiry is captured once at
- * startup and compared in memory — so it cannot be starved by a provider outage.
+ * <p>Sends run on a {@link BoundedSendExecutor} (a fixed worker pool + bounded queue), never on the Tomcat
+ * request thread, so an unreachable or misconfigured APNs can never exhaust the servlet thread pool and starve the
+ * health endpoint.
+ *
+ * <p>Health contract: the relay is healthy when it is <em>configured</em> (the signing key loaded successfully at
+ * startup) and the most recent send (if any) did not reveal a provider/credential problem. Reading health never
+ * performs I/O — it returns a cached flag — so it cannot be starved by a provider outage.
  */
 @Service
 public class ApnsSendService implements SendService<NotificationRequest> {
@@ -45,22 +51,28 @@ public class ApnsSendService implements SendService<NotificationRequest> {
 
     /**
      * APNs reason strings (the wire values returned by {@link PushNotificationResponse#getRejectionReason()}) that
-     * indicate OUR certificate/credentials are broken, i.e. every send will fail until it is fixed. Receiving one of
+     * indicate OUR signing key/credentials are broken, i.e. every send will fail until it is fixed. Receiving one of
      * these — or, far more commonly, a TLS/connection exception — flips the relay to unhealthy. Every other rejection
      * reason (bad/unregistered device token, payload too large, rate limiting, ...) means APNs was reachable and
      * rejected this one notification, so those keep the relay healthy. The values are Apple's documented reason
      * phrases (which {@code getRejectionReason()} returns verbatim).
+     *
+     * <p>Notably absent is {@code ExpiredProviderToken}: it is <em>not</em> a broken-credential signal. Pushy
+     * invalidates and regenerates its JWT when APNs returns it, so the next send re-authenticates and succeeds. A
+     * genuinely wrong Team ID / Key ID / key surfaces as {@code InvalidProviderToken} instead, which is retained.
      */
-    private static final Set<String> CREDENTIAL_REJECTION_REASONS = Set.of("BadCertificate", "BadCertificateEnvironment", "Forbidden", "ExpiredProviderToken",
-            "InvalidProviderToken", "MissingProviderToken");
+    private static final Set<String> CREDENTIAL_REJECTION_REASONS = Set.of("Forbidden", "InvalidProviderToken", "MissingProviderToken");
 
-    @Value("${APNS_CERTIFICATE_PATH: #{null}}")
-    private String apnsCertificatePath;
+    @Value("${APNS_TOKEN_KEY_PATH:#{null}}")
+    private String apnsTokenKeyPath;
 
-    @Value("${APNS_CERTIFICATE_PWD: #{null}}")
-    private String apnsCertificatePwd;
+    @Value("${APNS_TEAM_ID:#{null}}")
+    private String apnsTeamId;
 
-    @Value("${APNS_PROD_ENVIRONMENT: #{false}}")
+    @Value("${APNS_KEY_ID:#{null}}")
+    private String apnsKeyId;
+
+    @Value("${APNS_PROD_ENVIRONMENT:#{false}}")
     private Boolean apnsProdEnvironment = false;
 
     // Optional overrides used to point the client at a mock APNS gateway in tests.
@@ -86,19 +98,9 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     @Value("${apns.connection-timeout-ms:2000}")
     private long connectionTimeoutMs;
 
-    private final ApnsCertificateInspector certificateInspector = new ApnsCertificateInspector();
-
     private ApnsClient apnsClient;
 
     private volatile boolean isConnected;
-
-    /**
-     * The earliest expiry of the certificate that the {@link ApnsClient} actually loaded, captured once at startup.
-     * {@code null} if it could not be determined. Reading {@link #isHealthy()} compares this against the clock in
-     * memory, so an expired certificate is reported immediately (no polling lag) and runtime file rotation cannot
-     * mask the fact that pushy still holds the originally-loaded certificate.
-     */
-    private volatile Instant loadedCertificateExpiry;
 
     private BoundedSendExecutor dispatcher;
 
@@ -106,17 +108,18 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     public void applicationReady() {
         dispatcher = new BoundedSendExecutor("apns", workers, queueCapacity, responseTimeoutMs);
 
-        if (apnsCertificatePwd == null || apnsCertificatePath == null || apnsProdEnvironment == null) {
-            log.error("Could not init APNS service. Certificate information missing.");
+        if (apnsTokenKeyPath == null || apnsTeamId == null || apnsKeyId == null || apnsProdEnvironment == null) {
+            log.error("Could not init APNS service. Signing key information missing.");
             isConnected = false;
             return;
         }
         try {
             String apnsHost = apnsServerHost != null ? apnsServerHost
                     : (apnsProdEnvironment ? ApnsClientBuilder.PRODUCTION_APNS_HOST : ApnsClientBuilder.DEVELOPMENT_APNS_HOST);
+            ApnsSigningKey signingKey = ApnsSigningKey.loadFromPkcs8File(new File(apnsTokenKeyPath), apnsTeamId, apnsKeyId);
             ApnsClientBuilder clientBuilder = new ApnsClientBuilder()
                     .setApnsServer(apnsHost, apnsServerPort)
-                    .setClientCredentials(new File(apnsCertificatePath), apnsCertificatePwd)
+                    .setSigningKey(signingKey)
                     .setConnectionTimeout(Duration.ofMillis(connectionTimeoutMs));
             if (apnsTrustedCertPath != null) {
                 clientBuilder.setTrustedServerCertificateChain(new File(apnsTrustedCertPath));
@@ -124,13 +127,12 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             apnsClient = clientBuilder.build();
             isConnected = true;
             log.info("Started APNS client successfully (environment: {})", apnsProdEnvironment ? "production" : "development");
-        } catch (IOException e) {
+        } catch (IOException | NoSuchAlgorithmException | InvalidKeyException e) {
+            // A missing, unreadable, or malformed .p8 signing key. This is the only pre-send credential validation
+            // we do, so leave the relay unhealthy rather than discovering the problem on the first user notification.
             isConnected = false;
             log.error("Could not init APNS service", e);
         }
-
-        // Report an already-expired certificate immediately, before the first send is ever attempted.
-        captureLoadedCertificateExpiry();
     }
 
     @Override
@@ -161,8 +163,8 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             log.error("Interrupted while sending push notification.", e);
             return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).build();
         } catch (ExecutionException e) {
-            // The send never reached APNs — a TLS handshake / connection failure, which is exactly what an expired
-            // client certificate produces. Treat as "provider unreachable" so health honestly reports the outage.
+            // The send never reached APNs — a TLS handshake / connection failure. Treat as "provider unreachable"
+            // so health honestly reports the outage.
             isConnected = false;
             log.error("Failed to send push notification (provider unreachable).", e);
             return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).build();
@@ -194,14 +196,14 @@ public class ApnsSendService implements SendService<NotificationRequest> {
 
     private ResponseEntity<Void> handleResponse(PushNotificationResponse<SimpleApnsPushNotification> response, String token) {
         if (response.isAccepted()) {
-            // A successful send proves the connection (and thus the certificate) works.
+            // A successful send proves the connection (and thus the signing key) works.
             isConnected = true;
             log.info("Send notification to {}", token);
             return ResponseEntity.ok().build();
         }
         String reason = response.getRejectionReason().orElse("unknown");
         if (CREDENTIAL_REJECTION_REASONS.contains(reason)) {
-            // Our certificate/credentials are broken — every send will fail until this is fixed.
+            // Our signing key/credentials are broken — every send will fail until this is fixed.
             isConnected = false;
             log.error("Notification rejected by the APNs gateway due to a credential/configuration problem: {}", reason);
         } else {
@@ -213,28 +215,11 @@ public class ApnsSendService implements SendService<NotificationRequest> {
         return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).build();
     }
 
-    private void captureLoadedCertificateExpiry() {
-        loadedCertificateExpiry = certificateInspector.earliestExpiry(apnsCertificatePath, apnsCertificatePwd).orElse(null);
-        if (loadedCertificateExpiry == null) {
-            log.warn("Could not determine the APNs certificate expiry; health will rely on send outcomes only");
-        } else if (ApnsCertificateInspector.isExpired(loadedCertificateExpiry, Instant.now())) {
-            log.error("APNs certificate is EXPIRED (expired at {}); APNs is reported unhealthy until a valid certificate is deployed", loadedCertificateExpiry);
-        } else {
-            log.info("APNs certificate is valid until {}", loadedCertificateExpiry);
-        }
-    }
-
-    private boolean isLoadedCertificateExpired() {
-        Instant expiry = loadedCertificateExpiry;
-        return expiry != null && ApnsCertificateInspector.isExpired(expiry, Instant.now());
-    }
-
     @Override
     public boolean isHealthy() {
-        // ANDing with the certificate expiry means that even a previously-successful send (isConnected == true)
-        // cannot make the relay report healthy once the loaded certificate is past its expiry. This is computed in
-        // memory on every read, so it is honest at the exact expiry instant without any background polling.
-        return isConnected && !isLoadedCertificateExpired();
+        // Cached flag only: true once the signing key loaded at startup and no send has since revealed a
+        // credential/connection problem. Read in memory on every call, so a provider outage cannot starve it.
+        return isConnected;
     }
 
     @PreDestroy
