@@ -27,7 +27,7 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // Lets Netty's SelfSignedCertificate generate the mock APNS server's TLS material at runtime,
     // so no private keys need to be committed to the repository.
-    testImplementation 'org.bouncycastle:bcpkix-jdk18on:1.84'
+    testImplementation 'org.bouncycastle:bcpkix-jdk18on:1.86'
 }
 
 tasks.named('test') {
