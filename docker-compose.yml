@@ -8,6 +8,7 @@ services:
       - APNS_TEAM_ID
       - APNS_KEY_ID
       - APNS_PROD_ENVIRONMENT
+      - APNS_FALLBACK_ENVIRONMENT_ENABLED
       - APNS_TOKEN_KEY_PATH=/key/artemis-apns.p8
       - GOOGLE_APPLICATION_CREDENTIALS=/firebase.json
     volumes:
