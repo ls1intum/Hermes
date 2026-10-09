@@ -63,6 +63,11 @@ public class ApnsSendService implements SendService<NotificationRequest> {
      */
     private static final Set<String> CREDENTIAL_REJECTION_REASONS = Set.of("Forbidden", "InvalidProviderToken", "MissingProviderToken");
 
+    // APNs answers this when a token is sent to the gateway of the wrong environment (sandbox token on production or
+    // the other way round) or is otherwise malformed. Only this reason triggers the fallback: Unregistered and
+    // DeviceTokenNotForTopic mean the token is known to this environment, so retrying elsewhere cannot help.
+    private static final String BAD_DEVICE_TOKEN = "BadDeviceToken";
+
     @Value("${APNS_TOKEN_KEY_PATH:#{null}}")
     private String apnsTokenKeyPath;
 
@@ -75,13 +80,28 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     @Value("${APNS_PROD_ENVIRONMENT:#{false}}")
     private Boolean apnsProdEnvironment = false;
 
-    // Optional overrides used to point the client at a mock APNS gateway in tests.
+    /**
+     * Device tokens are only valid on the APNs gateway that matches the app's signing environment: TestFlight and App
+     * Store builds register production tokens, Xcode debug builds register sandbox tokens. When enabled, a send that
+     * the primary gateway rejects as {@code BadDeviceToken} is retried once on the other gateway, so one relay serves
+     * both kinds of build. The signing key must be valid for both environments.
+     */
+    @Value("${APNS_FALLBACK_ENVIRONMENT_ENABLED:#{false}}")
+    private Boolean apnsFallbackEnabled = false;
+
+    // Optional overrides used to point the clients at mock APNS gateways in tests.
     // In production these stay unset and the real Apple hosts (port 443) are used.
     @Value("${APNS_SERVER_HOST:#{null}}")
     private String apnsServerHost;
 
     @Value("${APNS_SERVER_PORT:443}")
     private int apnsServerPort;
+
+    @Value("${APNS_FALLBACK_SERVER_HOST:#{null}}")
+    private String apnsFallbackServerHost;
+
+    @Value("${APNS_FALLBACK_SERVER_PORT:443}")
+    private int apnsFallbackServerPort;
 
     @Value("${APNS_TRUSTED_CERT_PATH:#{null}}")
     private String apnsTrustedCertPath;
@@ -100,6 +120,10 @@ public class ApnsSendService implements SendService<NotificationRequest> {
 
     private ApnsClient apnsClient;
 
+    // The gateway of the other environment; null unless the fallback is enabled and its client could be built.
+    // It never influences health: only the primary gateway decides whether the relay is healthy.
+    private ApnsClient fallbackApnsClient;
+
     private volatile boolean isConnected;
 
     private BoundedSendExecutor dispatcher;
@@ -114,25 +138,51 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             return;
         }
         try {
-            String apnsHost = apnsServerHost != null ? apnsServerHost
-                    : (apnsProdEnvironment ? ApnsClientBuilder.PRODUCTION_APNS_HOST : ApnsClientBuilder.DEVELOPMENT_APNS_HOST);
+            String apnsHost = apnsServerHost != null ? apnsServerHost : gatewayHost(apnsProdEnvironment);
             ApnsSigningKey signingKey = ApnsSigningKey.loadFromPkcs8File(new File(apnsTokenKeyPath), apnsTeamId, apnsKeyId);
-            ApnsClientBuilder clientBuilder = new ApnsClientBuilder()
-                    .setApnsServer(apnsHost, apnsServerPort)
-                    .setSigningKey(signingKey)
-                    .setConnectionTimeout(Duration.ofMillis(connectionTimeoutMs));
-            if (apnsTrustedCertPath != null) {
-                clientBuilder.setTrustedServerCertificateChain(new File(apnsTrustedCertPath));
-            }
-            apnsClient = clientBuilder.build();
+            apnsClient = buildClient(signingKey, apnsHost, apnsServerPort);
             isConnected = true;
-            log.info("Started APNS client successfully (environment: {})", apnsProdEnvironment ? "production" : "development");
+            log.info("Started APNS client successfully (environment: {})", environmentName(apnsProdEnvironment));
+
+            if (Boolean.TRUE.equals(apnsFallbackEnabled)) {
+                startFallbackClient(signingKey);
+            }
         } catch (IOException | NoSuchAlgorithmException | InvalidKeyException e) {
             // A missing, unreadable, or malformed .p8 signing key. This is the only pre-send credential validation
             // we do, so leave the relay unhealthy rather than discovering the problem on the first user notification.
             isConnected = false;
             log.error("Could not init APNS service", e);
         }
+    }
+
+    private void startFallbackClient(ApnsSigningKey signingKey) {
+        String fallbackHost = apnsFallbackServerHost != null ? apnsFallbackServerHost : gatewayHost(!apnsProdEnvironment);
+        try {
+            fallbackApnsClient = buildClient(signingKey, fallbackHost, apnsFallbackServerPort);
+            log.info("Started APNS fallback client successfully (environment: {})", environmentName(!apnsProdEnvironment));
+        } catch (IOException e) {
+            // The primary gateway still works, so the relay stays healthy; it just cannot serve the other environment.
+            log.warn("Could not start the APNS fallback client; tokens of the {} environment will be rejected", environmentName(!apnsProdEnvironment), e);
+        }
+    }
+
+    private ApnsClient buildClient(ApnsSigningKey signingKey, String host, int port) throws IOException {
+        ApnsClientBuilder clientBuilder = new ApnsClientBuilder()
+                .setApnsServer(host, port)
+                .setSigningKey(signingKey)
+                .setConnectionTimeout(Duration.ofMillis(connectionTimeoutMs));
+        if (apnsTrustedCertPath != null) {
+            clientBuilder.setTrustedServerCertificateChain(new File(apnsTrustedCertPath));
+        }
+        return clientBuilder.build();
+    }
+
+    private static String gatewayHost(boolean production) {
+        return production ? ApnsClientBuilder.PRODUCTION_APNS_HOST : ApnsClientBuilder.DEVELOPMENT_APNS_HOST;
+    }
+
+    private static String environmentName(boolean production) {
+        return production ? "production" : "development";
     }
 
     @Override
@@ -156,6 +206,14 @@ public class ApnsSendService implements SendService<NotificationRequest> {
         PushNotificationFuture<SimpleApnsPushNotification, PushNotificationResponse<SimpleApnsPushNotification>> responseFuture = apnsClient.sendNotification(notification);
         try {
             PushNotificationResponse<SimpleApnsPushNotification> response = responseFuture.get();
+            if (fallbackApnsClient != null && isBadDeviceToken(response)) {
+                // The primary gateway answered and authenticated us (BadDeviceToken is not a credential reason), so it
+                // is healthy; the token most likely belongs to the other environment.
+                isConnected = true;
+                if (sendViaFallback(notification, request.token())) {
+                    return ResponseEntity.ok().build();
+                }
+            }
             return handleResponse(response, request.token());
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
@@ -169,6 +227,33 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             log.error("Failed to send push notification (provider unreachable).", e);
             return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).build();
         }
+    }
+
+    private static boolean isBadDeviceToken(PushNotificationResponse<SimpleApnsPushNotification> response) {
+        return !response.isAccepted() && BAD_DEVICE_TOKEN.equals(response.getRejectionReason().orElse(null));
+    }
+
+    /**
+     * Retries a notification on the gateway of the other environment. Returns {@code true} only if that gateway
+     * accepted it. Every other outcome (rejection, credential problem, connection failure) returns {@code false}
+     * and is deliberately kept out of the health state: the primary gateway's response is reported instead.
+     */
+    private boolean sendViaFallback(SimpleApnsPushNotification notification, String token) {
+        try {
+            PushNotificationResponse<SimpleApnsPushNotification> response = fallbackApnsClient.sendNotification(notification).get();
+            if (response.isAccepted()) {
+                log.info("Send notification to {} via the {} gateway (the token belongs to the other APNs environment)", token, environmentName(!apnsProdEnvironment));
+                return true;
+            }
+            log.warn("Notification also rejected by the {} fallback gateway for token {}: {}", environmentName(!apnsProdEnvironment), token,
+                    response.getRejectionReason().orElse("unknown"));
+        } catch (InterruptedException e) {
+            Thread.currentThread().interrupt();
+            log.warn("Interrupted while sending push notification via the fallback gateway.", e);
+        } catch (ExecutionException e) {
+            log.warn("Failed to send push notification via the fallback gateway.", e);
+        }
+        return false;
     }
 
     private SimpleApnsPushNotification buildNotification(NotificationRequest request) {
@@ -229,6 +314,9 @@ public class ApnsSendService implements SendService<NotificationRequest> {
         }
         if (apnsClient != null) {
             apnsClient.close();
+        }
+        if (fallbackApnsClient != null) {
+            fallbackApnsClient.close();
         }
     }
 

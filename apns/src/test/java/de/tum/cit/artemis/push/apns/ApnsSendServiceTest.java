@@ -19,6 +19,7 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeAll;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.Timeout;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
 import org.springframework.test.util.ReflectionTestUtils;
@@ -32,7 +33,9 @@ import java.security.KeyPair;
 import java.security.KeyPairGenerator;
 import java.security.interfaces.ECPublicKey;
 import java.security.spec.ECGenParameterSpec;
+import java.util.ArrayList;
 import java.util.Base64;
+import java.util.List;
 import java.util.Map;
 import java.util.Set;
 
@@ -66,7 +69,13 @@ class ApnsSendServiceTest {
     private static File signingKeyFile;
     private static final RecordingHandlerFactory handlerFactory = new RecordingHandlerFactory();
 
+    // A second mock gateway standing in for the APNs environment that the fallback client talks to.
+    private static int fallbackPort;
+    private static MockApnsServer fallbackMockServer;
+    private static final RecordingHandlerFactory fallbackHandlerFactory = new RecordingHandlerFactory();
+
     private ApnsSendService service;
+    private final List<ApnsSendService> startedServices = new ArrayList<>();
 
     @BeforeAll
     static void startMockServer() throws Exception {
@@ -84,12 +93,28 @@ class ApnsSendServiceTest {
                 .setHandlerFactory(handlerFactory)
                 .build();
         mockServer.start(port).get();
+
+        fallbackPort = freePort();
+        fallbackMockServer = new MockApnsServerBuilder()
+                .setServerCredentials(serverCertificate.certificate(), serverCertificate.privateKey(), null)
+                .setHandlerFactory(fallbackHandlerFactory)
+                .build();
+        fallbackMockServer.start(fallbackPort).get();
+    }
+
+    private static int freePort() throws Exception {
+        try (ServerSocket socket = new ServerSocket(0)) {
+            return socket.getLocalPort();
+        }
     }
 
     @AfterAll
     static void stopMockServer() throws Exception {
         if (mockServer != null) {
             mockServer.shutdown().get();
+        }
+        if (fallbackMockServer != null) {
+            fallbackMockServer.shutdown().get();
         }
         if (serverCertificate != null) {
             serverCertificate.delete();
@@ -105,19 +130,33 @@ class ApnsSendServiceTest {
     @BeforeEach
     void setUp() {
         handlerFactory.reset();
+        fallbackHandlerFactory.reset();
 
-        service = new ApnsSendService();
-        ReflectionTestUtils.setField(service, "apnsTokenKeyPath", signingKeyFile.getAbsolutePath());
-        ReflectionTestUtils.setField(service, "apnsTeamId", TEAM_ID);
-        ReflectionTestUtils.setField(service, "apnsKeyId", KEY_ID);
-        ReflectionTestUtils.setField(service, "apnsProdEnvironment", false);
-        ReflectionTestUtils.setField(service, "apnsServerHost", "localhost");
-        ReflectionTestUtils.setField(service, "apnsServerPort", port);
-        ReflectionTestUtils.setField(service, "apnsTrustedCertPath", serverCertificate.certificate().getAbsolutePath());
-        applyExecutorConfig(service);
+        service = startService(false, fallbackPort);
+    }
 
-        service.applicationReady();
-        assertThat(service.isHealthy()).as("client should initialise successfully").isTrue();
+    /**
+     * Starts a service whose primary client talks to {@link #mockServer} and, if enabled, whose fallback client talks to
+     * the mock gateway on {@code fallbackServerPort}.
+     */
+    private ApnsSendService startService(boolean fallbackEnabled, int fallbackServerPort) {
+        ApnsSendService started = new ApnsSendService();
+        ReflectionTestUtils.setField(started, "apnsTokenKeyPath", signingKeyFile.getAbsolutePath());
+        ReflectionTestUtils.setField(started, "apnsTeamId", TEAM_ID);
+        ReflectionTestUtils.setField(started, "apnsKeyId", KEY_ID);
+        ReflectionTestUtils.setField(started, "apnsProdEnvironment", false);
+        ReflectionTestUtils.setField(started, "apnsServerHost", "localhost");
+        ReflectionTestUtils.setField(started, "apnsServerPort", port);
+        ReflectionTestUtils.setField(started, "apnsFallbackEnabled", fallbackEnabled);
+        ReflectionTestUtils.setField(started, "apnsFallbackServerHost", "localhost");
+        ReflectionTestUtils.setField(started, "apnsFallbackServerPort", fallbackServerPort);
+        ReflectionTestUtils.setField(started, "apnsTrustedCertPath", serverCertificate.certificate().getAbsolutePath());
+        applyExecutorConfig(started);
+
+        started.applicationReady();
+        assertThat(started.isHealthy()).as("client should initialise successfully").isTrue();
+        startedServices.add(started);
+        return started;
     }
 
     /** Supplies the bounded-executor settings that Spring would normally inject from @Value defaults. */
@@ -150,10 +189,14 @@ class ApnsSendServiceTest {
 
     @AfterEach
     void tearDown() {
-        Object client = ReflectionTestUtils.getField(service, "apnsClient");
-        if (client instanceof ApnsClient apnsClient) {
-            apnsClient.close();
+        for (ApnsSendService started : startedServices) {
+            for (String field : List.of("apnsClient", "fallbackApnsClient")) {
+                if (ReflectionTestUtils.getField(started, field) instanceof ApnsClient client) {
+                    client.close();
+                }
+            }
         }
+        startedServices.clear();
     }
 
     @Test
@@ -282,6 +325,82 @@ class ApnsSendServiceTest {
                 apnsClient.close();
             }
         }
+    }
+
+    @Test
+    void fallbackGatewayAcceptsTokenThePrimaryRejectsAsBadDeviceToken() {
+        ApnsSendService withFallback = startService(true, fallbackPort);
+        handlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
+
+        ResponseEntity<Void> response = withFallback.doSend(new NotificationRequest("iv", "p", "prod-token", PushNotificationApiType.IOS_V2));
+
+        // A 200 also stops the Artemis server from retrying the relay request.
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(withFallback.isHealthy()).isTrue();
+        assertThat(handlerFactory.lastHeaders).as("the primary gateway is asked first").isNotNull();
+        assertThat(fallbackHandlerFactory.lastHeaders).as("the fallback gateway received the retry").isNotNull();
+        assertThat(fallbackHandlerFactory.lastHeaders.get("apns-topic").toString()).isEqualTo(EXPECTED_TOPIC);
+        assertThat(fallbackHandlerFactory.lastPayload).contains("\"iv\":\"iv\"").contains("\"payload\":\"p\"");
+    }
+
+    @Test
+    void bothGatewaysRejectingBadDeviceTokenReturnsExpectationFailedButStaysHealthy() {
+        ApnsSendService withFallback = startService(true, fallbackPort);
+        handlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
+        fallbackHandlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
+
+        ResponseEntity<Void> response = withFallback.doSend(new NotificationRequest("iv", "p", "garbage", PushNotificationApiType.IOS_V2));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
+        assertThat(withFallback.isHealthy()).isTrue();
+        assertThat(fallbackHandlerFactory.lastHeaders).isNotNull();
+    }
+
+    @Test
+    void fallbackIsNotUsedWhenDisabled() {
+        handlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
+
+        ResponseEntity<Void> response = service.doSend(new NotificationRequest("iv", "p", "prod-token", PushNotificationApiType.IOS_V2));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
+        assertThat(fallbackHandlerFactory.lastHeaders).as("the fallback gateway must stay untouched").isNull();
+    }
+
+    @Test
+    void fallbackIsNotUsedForRejectionsOtherThanBadDeviceToken() {
+        ApnsSendService withFallback = startService(true, fallbackPort);
+        handlerFactory.rejectWith = RejectionReason.UNREGISTERED;
+
+        ResponseEntity<Void> response = withFallback.doSend(new NotificationRequest("iv", "p", "gone-token", PushNotificationApiType.IOS_V2));
+
+        // Unregistered means the token is known to this environment, so asking the other one cannot help.
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
+        assertThat(fallbackHandlerFactory.lastHeaders).isNull();
+    }
+
+    @Test
+    void credentialRejectionFromFallbackGatewayDoesNotAffectHealth() {
+        ApnsSendService withFallback = startService(true, fallbackPort);
+        handlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
+        // For example a key that Apple limited to a single environment.
+        fallbackHandlerFactory.rejectWith = RejectionReason.INVALID_PROVIDER_TOKEN;
+
+        ResponseEntity<Void> response = withFallback.doSend(new NotificationRequest("iv", "p", "prod-token", PushNotificationApiType.IOS_V2));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
+        assertThat(withFallback.isHealthy()).as("only the primary gateway decides health").isTrue();
+    }
+
+    @Test
+    @Timeout(60)
+    void unreachableFallbackGatewayDoesNotAffectHealth() throws Exception {
+        ApnsSendService withFallback = startService(true, freePort());
+        handlerFactory.rejectWith = RejectionReason.BAD_DEVICE_TOKEN;
+
+        ResponseEntity<Void> response = withFallback.doSend(new NotificationRequest("iv", "p", "prod-token", PushNotificationApiType.IOS_V2));
+
+        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.EXPECTATION_FAILED);
+        assertThat(withFallback.isHealthy()).as("a fallback connection failure must not flag the relay as unhealthy").isTrue();
     }
 
     private static String header(String name) {
