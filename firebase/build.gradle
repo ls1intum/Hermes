@@ -27,6 +27,12 @@ dependencies {
     implementation "com.google.protobuf:protobuf-java:4.36.2"
     implementation "com.google.protobuf:protobuf-java-util:4.36.2"
 
+    constraints {
+        implementation("com.google.guava:guava:33.8.0-jre") {
+            because "firebase-admin and protobuf-java-util resolve an older Guava with known vulnerabilities"
+        }
+    }
+
     implementation(project(":common"))
 
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
