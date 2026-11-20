@@ -4,7 +4,7 @@ RUN ./gradlew hermes:bootJar
 
 # The runtime uses Oracle JDK 25.0.5.1 until a Temurin 25 image with the same fixes is published.
 # The archive is pinned by version and verified against Oracle's published SHA-256 checksum.
-FROM docker.io/library/ubuntu:24.04 AS jdk
+FROM docker.io/library/ubuntu:26.04 AS jdk
 ARG TARGETARCH
 ARG JDK_VERSION=25.0.5.1
 ARG JDK_SHA256_AMD64=3d40d69461200594380ac84c17be6224539022028730cffe043ac70c41ffd1d5
@@ -23,7 +23,7 @@ RUN case "${TARGETARCH}" in \
     && tar -xzf /tmp/jdk.tar.gz -C /opt/java/jdk --strip-components=1 \
     && rm /tmp/jdk.tar.gz
 
-FROM docker.io/library/ubuntu:24.04
+FROM docker.io/library/ubuntu:26.04
 ENV JAVA_HOME=/opt/java/jdk
 ENV PATH="${JAVA_HOME}/bin:${PATH}"
 COPY --from=jdk /opt/java/jdk /opt/java/jdk
