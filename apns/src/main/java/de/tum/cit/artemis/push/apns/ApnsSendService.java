@@ -70,6 +70,12 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     // DeviceTokenNotForTopic mean the token is known to this environment, so retrying elsewhere cannot help.
     private static final String BAD_DEVICE_TOKEN = "BadDeviceToken";
 
+    private static final String DEFAULT_TOPIC = "de.tum.cit.ase.artemis";
+
+    private static final int DEFAULT_EXPIRATION_DAYS = 7;
+
+    private static final int DEFAULT_ALERT_PRIORITY = 5;
+
     @Value("${APNS_TOKEN_KEY_PATH:#{null}}")
     private String apnsTokenKeyPath;
 
@@ -80,7 +86,7 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     private String apnsKeyId;
 
     @Value("${APNS_PROD_ENVIRONMENT:#{false}}")
-    private boolean apnsProdEnvironment = false;
+    private Boolean apnsProdEnvironment = false;
 
     /**
      * Device tokens are only valid on the APNs gateway that matches the app's signing environment: TestFlight and App
@@ -89,7 +95,7 @@ public class ApnsSendService implements SendService<NotificationRequest> {
      * both kinds of build. The signing key must be valid for both environments.
      */
     @Value("${APNS_FALLBACK_ENVIRONMENT_ENABLED:#{false}}")
-    private boolean apnsFallbackEnabled = false;
+    private Boolean apnsFallbackEnabled = false;
 
     // Optional overrides used to point the clients at mock APNS gateways in tests.
     // In production these stay unset and the real Apple hosts (port 443) are used.
@@ -110,16 +116,16 @@ public class ApnsSendService implements SendService<NotificationRequest> {
 
     // The app's bundle identifier; APNs rejects notifications whose topic does not match the signing key's app.
     @Value("${apns.topic:de.tum.cit.ase.artemis}")
-    private String topic = "de.tum.cit.ase.artemis";
+    private String topic = DEFAULT_TOPIC;
 
     // How long APNs keeps trying to deliver a notification to an offline device.
     @Value("${apns.expiration-days:7}")
-    private int expirationDays = 7;
+    private Integer expirationDays = DEFAULT_EXPIRATION_DAYS;
 
     // Delivery priority of visible (alert) notifications: 10 = immediately, 5 = power-considerate (may be delayed).
     // Background notifications must always use 5.
     @Value("${apns.alert-priority:5}")
-    private int alertPriority = 5;
+    private Integer alertPriority = DEFAULT_ALERT_PRIORITY;
 
     @Value("${apns.workers:50}")
     private int workers;
@@ -153,9 +159,10 @@ public class ApnsSendService implements SendService<NotificationRequest> {
 
     @EventListener(ApplicationReadyEvent.class)
     public void applicationReady() {
+        normalizeNotificationSettings();
         dispatcher = new BoundedSendExecutor("apns", workers, queueCapacity, responseTimeoutMs, meterRegistry);
 
-        if (apnsTokenKeyPath == null || apnsTeamId == null || apnsKeyId == null) {
+        if (apnsTokenKeyPath == null || apnsTeamId == null || apnsKeyId == null || apnsProdEnvironment == null) {
             log.error("Could not init APNS service. Signing key information missing.");
             isConnected = false;
             return;
@@ -167,7 +174,7 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             isConnected = true;
             log.info("Started APNS client successfully (environment: {})", environmentName(apnsProdEnvironment));
 
-            if (apnsFallbackEnabled) {
+            if (Boolean.TRUE.equals(apnsFallbackEnabled)) {
                 startFallbackClient(signingKey);
             }
         } catch (IOException | NoSuchAlgorithmException | InvalidKeyException e) {
@@ -175,6 +182,26 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             // we do, so leave the relay unhealthy rather than discovering the problem on the first user notification.
             isConnected = false;
             log.error("Could not init APNS service", e);
+        }
+    }
+
+    /**
+     * Falls back to the defaults for an unset/empty or invalid notification setting instead of failing. A bad value
+     * (for example an empty environment variable, or a priority Apple does not define) must degrade to the previous
+     * behaviour, never take the whole relay down or make every send fail.
+     */
+    private void normalizeNotificationSettings() {
+        if (topic == null || topic.isBlank()) {
+            topic = DEFAULT_TOPIC;
+        }
+        if (expirationDays == null || expirationDays < 1) {
+            log.error("Invalid apns.expiration-days '{}'; using {}", expirationDays, DEFAULT_EXPIRATION_DAYS);
+            expirationDays = DEFAULT_EXPIRATION_DAYS;
+        }
+        // Apple only defines priorities 10 (immediately) and 5 (power-considerate) for alert notifications.
+        if (alertPriority == null || (alertPriority != 5 && alertPriority != 10)) {
+            log.error("Invalid apns.alert-priority '{}' (must be 5 or 10); using {}", alertPriority, DEFAULT_ALERT_PRIORITY);
+            alertPriority = DEFAULT_ALERT_PRIORITY;
         }
     }
 

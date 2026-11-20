@@ -295,6 +295,37 @@ class ApnsSendServiceTest {
     }
 
     @Test
+    void unsetEnvironmentFlagLeavesServiceUnhealthyInsteadOfFailing() {
+        // An empty APNS_PROD_ENVIRONMENT converts to null. The relay must start degraded (unhealthy), not crash.
+        ApnsSendService service = new ApnsSendService();
+        ReflectionTestUtils.setField(service, "apnsTokenKeyPath", "/nonexistent/definitely-not-here.p8");
+        ReflectionTestUtils.setField(service, "apnsTeamId", TEAM_ID);
+        ReflectionTestUtils.setField(service, "apnsKeyId", KEY_ID);
+        ReflectionTestUtils.setField(service, "apnsProdEnvironment", null);
+        ReflectionTestUtils.setField(service, "apnsFallbackEnabled", null);
+        applyExecutorConfig(service);
+
+        service.applicationReady();
+
+        assertThat(service.isHealthy()).isFalse();
+    }
+
+    @Test
+    void invalidNotificationSettingsFallBackToTheDefaults() {
+        ApnsSendService service = new ApnsSendService();
+        ReflectionTestUtils.setField(service, "topic", " ");
+        ReflectionTestUtils.setField(service, "expirationDays", 0);
+        ReflectionTestUtils.setField(service, "alertPriority", 7);
+        applyExecutorConfig(service);
+
+        service.applicationReady(); // no signing key configured: only the settings are normalized
+
+        assertThat(ReflectionTestUtils.getField(service, "topic")).isEqualTo("de.tum.cit.ase.artemis");
+        assertThat(ReflectionTestUtils.getField(service, "expirationDays")).isEqualTo(7);
+        assertThat(ReflectionTestUtils.getField(service, "alertPriority")).isEqualTo(5);
+    }
+
+    @Test
     void handshakeFailureMarksServiceUnhealthy() {
         // A TLS handshake failure is the credential-independent "provider unreachable" path pushy surfaces as an
         // ExecutionException on the send. We reproduce it deterministically by pointing a fresh service at the real
