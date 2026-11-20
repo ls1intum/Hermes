@@ -17,8 +17,8 @@ jobs:
           distribution: temurin
           java-version: '25'
           cache: gradle
-      - name: Run tests
-        run: ./gradlew test
+      - name: Build and run tests
+        run: ./gradlew build
       - name: Upload test reports
         if: always()
         uses: actions/upload-artifact@v7

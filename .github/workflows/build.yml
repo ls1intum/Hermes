@@ -14,3 +14,6 @@ jobs:
       # "ls1intum/Hermes" (capital H), which is an invalid tag. Pin the lowercase image name
       # (matches the image referenced in docker-compose.yml).
       image-name: ls1intum/hermes
+      # Besides latest / <branch> / pr-<n>, also publish an immutable tag per commit (sha-<short commit>), so a
+      # deployment can be pinned to an exact build and rolled back to a previous one.
+      tags: type=sha

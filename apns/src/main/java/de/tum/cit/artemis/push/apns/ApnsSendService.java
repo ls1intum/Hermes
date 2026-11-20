@@ -9,9 +9,11 @@ import de.tum.cit.artemis.push.common.BoundedSendExecutor;
 import de.tum.cit.artemis.push.common.NotificationRequest;
 import de.tum.cit.artemis.push.common.PushNotificationApiType;
 import de.tum.cit.artemis.push.common.SendService;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.boot.context.event.ApplicationReadyEvent;
 import org.springframework.context.event.EventListener;
@@ -68,6 +70,12 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     // DeviceTokenNotForTopic mean the token is known to this environment, so retrying elsewhere cannot help.
     private static final String BAD_DEVICE_TOKEN = "BadDeviceToken";
 
+    private static final String DEFAULT_TOPIC = "de.tum.cit.ase.artemis";
+
+    private static final int DEFAULT_EXPIRATION_DAYS = 7;
+
+    private static final int DEFAULT_ALERT_PRIORITY = 5;
+
     @Value("${APNS_TOKEN_KEY_PATH:#{null}}")
     private String apnsTokenKeyPath;
 
@@ -106,6 +114,19 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     @Value("${APNS_TRUSTED_CERT_PATH:#{null}}")
     private String apnsTrustedCertPath;
 
+    // The app's bundle identifier; APNs rejects notifications whose topic does not match the signing key's app.
+    @Value("${apns.topic:de.tum.cit.ase.artemis}")
+    private String topic = DEFAULT_TOPIC;
+
+    // How long APNs keeps trying to deliver a notification to an offline device.
+    @Value("${apns.expiration-days:7}")
+    private Integer expirationDays = DEFAULT_EXPIRATION_DAYS;
+
+    // Delivery priority of visible (alert) notifications: 10 = immediately, 5 = power-considerate (may be delayed).
+    // Background notifications must always use 5.
+    @Value("${apns.alert-priority:5}")
+    private Integer alertPriority = DEFAULT_ALERT_PRIORITY;
+
     @Value("${apns.workers:50}")
     private int workers;
 
@@ -128,9 +149,18 @@ public class ApnsSendService implements SendService<NotificationRequest> {
 
     private BoundedSendExecutor dispatcher;
 
+    private MeterRegistry meterRegistry;
+
+    // Optional: absent when metrics are not on the classpath (e.g. in plain unit tests).
+    @Autowired(required = false)
+    void setMeterRegistry(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
+
     @EventListener(ApplicationReadyEvent.class)
     public void applicationReady() {
-        dispatcher = new BoundedSendExecutor("apns", workers, queueCapacity, responseTimeoutMs);
+        normalizeNotificationSettings();
+        dispatcher = new BoundedSendExecutor("apns", workers, queueCapacity, responseTimeoutMs, meterRegistry);
 
         if (apnsTokenKeyPath == null || apnsTeamId == null || apnsKeyId == null || apnsProdEnvironment == null) {
             log.error("Could not init APNS service. Signing key information missing.");
@@ -152,6 +182,26 @@ public class ApnsSendService implements SendService<NotificationRequest> {
             // we do, so leave the relay unhealthy rather than discovering the problem on the first user notification.
             isConnected = false;
             log.error("Could not init APNS service", e);
+        }
+    }
+
+    /**
+     * Falls back to the defaults for an unset/empty or invalid notification setting instead of failing. A bad value
+     * (for example an empty environment variable, or a priority Apple does not define) must degrade to the previous
+     * behaviour, never take the whole relay down or make every send fail.
+     */
+    private void normalizeNotificationSettings() {
+        if (topic == null || topic.isBlank()) {
+            topic = DEFAULT_TOPIC;
+        }
+        if (expirationDays == null || expirationDays < 1) {
+            log.error("Invalid apns.expiration-days '{}'; using {}", expirationDays, DEFAULT_EXPIRATION_DAYS);
+            expirationDays = DEFAULT_EXPIRATION_DAYS;
+        }
+        // Apple only defines priorities 10 (immediately) and 5 (power-considerate) for alert notifications.
+        if (alertPriority == null || (alertPriority != 5 && alertPriority != 10)) {
+            log.error("Invalid apns.alert-priority '{}' (must be 5 or 10); using {}", alertPriority, DEFAULT_ALERT_PRIORITY);
+            alertPriority = DEFAULT_ALERT_PRIORITY;
         }
     }
 
@@ -189,7 +239,7 @@ public class ApnsSendService implements SendService<NotificationRequest> {
     public DeferredResult<ResponseEntity<Void>> send(NotificationRequest request) {
         if (dispatcher == null) {
             // Should not happen once the application is ready, but stay defensive rather than NPE.
-            return completed(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build());
+            return BoundedSendExecutor.completed(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build());
         }
         return dispatcher.submit(() -> doSend(request));
     }
@@ -210,11 +260,11 @@ public class ApnsSendService implements SendService<NotificationRequest> {
                 // The primary gateway answered and authenticated us (BadDeviceToken is not a credential reason), so it
                 // is healthy; the token most likely belongs to the other environment.
                 isConnected = true;
-                if (sendViaFallback(notification, request.token())) {
+                if (sendViaFallback(notification)) {
                     return ResponseEntity.ok().build();
                 }
             }
-            return handleResponse(response, request.token());
+            return handleResponse(response);
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             isConnected = false;
@@ -238,15 +288,14 @@ public class ApnsSendService implements SendService<NotificationRequest> {
      * accepted it. Every other outcome (rejection, credential problem, connection failure) returns {@code false}
      * and is deliberately kept out of the health state: the primary gateway's response is reported instead.
      */
-    private boolean sendViaFallback(SimpleApnsPushNotification notification, String token) {
+    private boolean sendViaFallback(SimpleApnsPushNotification notification) {
         try {
             PushNotificationResponse<SimpleApnsPushNotification> response = fallbackApnsClient.sendNotification(notification).get();
             if (response.isAccepted()) {
-                log.info("Send notification to {} via the {} gateway (the token belongs to the other APNs environment)", token, environmentName(!apnsProdEnvironment));
+                log.info("Sent notification via the {} gateway (the device token belongs to the other APNs environment)", environmentName(!apnsProdEnvironment));
                 return true;
             }
-            log.warn("Notification also rejected by the {} fallback gateway for token {}: {}", environmentName(!apnsProdEnvironment), token,
-                    response.getRejectionReason().orElse("unknown"));
+            log.warn("Notification also rejected by the {} fallback gateway: {}", environmentName(!apnsProdEnvironment), response.getRejectionReason().orElse("unknown"));
         } catch (InterruptedException e) {
             Thread.currentThread().interrupt();
             log.warn("Interrupted while sending push notification via the fallback gateway.", e);
@@ -272,18 +321,18 @@ public class ApnsSendService implements SendService<NotificationRequest> {
         }
 
         return new SimpleApnsPushNotification(request.token(),
-                "de.tum.cit.ase.artemis",
+                topic,
                 payload.build(),
-                Instant.now().plus(Duration.ofDays(7)),
-                DeliveryPriority.getFromCode(5),
+                Instant.now().plus(Duration.ofDays(expirationDays)),
+                isV2Api ? DeliveryPriority.getFromCode(alertPriority) : DeliveryPriority.CONSERVE_POWER,
                 isV2Api ? PushType.ALERT : PushType.BACKGROUND);
     }
 
-    private ResponseEntity<Void> handleResponse(PushNotificationResponse<SimpleApnsPushNotification> response, String token) {
+    private ResponseEntity<Void> handleResponse(PushNotificationResponse<SimpleApnsPushNotification> response) {
         if (response.isAccepted()) {
             // A successful send proves the connection (and thus the signing key) works.
             isConnected = true;
-            log.info("Send notification to {}", token);
+            log.debug("Sent notification");
             return ResponseEntity.ok().build();
         }
         String reason = response.getRejectionReason().orElse("unknown");
@@ -294,9 +343,9 @@ public class ApnsSendService implements SendService<NotificationRequest> {
         } else {
             // APNs was reachable and rejected this single notification (e.g. bad/unregistered token). Stay healthy.
             isConnected = true;
-            log.warn("Notification rejected by the APNs gateway for token {}: {}", token, reason);
+            log.warn("Notification rejected by the APNs gateway: {}", reason);
         }
-        response.getTokenInvalidationTimestamp().ifPresent(timestamp -> log.warn("\t... and the token is invalid as of {}", timestamp));
+        response.getTokenInvalidationTimestamp().ifPresent(timestamp -> log.warn("\t... and the device token is invalid as of {}", timestamp));
         return ResponseEntity.status(HttpStatus.EXPECTATION_FAILED).build();
     }
 
@@ -318,11 +367,5 @@ public class ApnsSendService implements SendService<NotificationRequest> {
         if (fallbackApnsClient != null) {
             fallbackApnsClient.close();
         }
-    }
-
-    private static DeferredResult<ResponseEntity<Void>> completed(ResponseEntity<Void> response) {
-        DeferredResult<ResponseEntity<Void>> deferred = new DeferredResult<>();
-        deferred.setResult(response);
-        return deferred;
     }
 }

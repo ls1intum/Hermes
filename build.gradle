@@ -1,14 +1,43 @@
-buildscript {
-    repositories {
-        mavenCentral()
-    }
-}
-
 plugins {
+    // Only `hermes` is a runnable application; it applies the Spring Boot plugin itself (see hermes/build.gradle).
+    // It is put on the root classpath here so the subprojects below can import the Spring Boot BOM.
+    id 'org.springframework.boot' apply false
+    id 'io.spring.dependency-management' apply false
 }
 
 allprojects {
     repositories {
         mavenCentral()
+    }
+}
+
+// Configuration shared by all modules. The modules `common`, `apns` and `firebase` are plain libraries
+// (java-library): they get the managed dependency versions of Spring Boot but no executable boot jar.
+subprojects {
+    apply plugin: 'java-library'
+    apply plugin: 'io.spring.dependency-management'
+
+    group = 'de.tum.cit.aet.artemis.push'
+    version = '1.0.0'
+
+    java {
+        toolchain {
+            languageVersion = JavaLanguageVersion.of(25)
+        }
+    }
+
+    dependencyManagement {
+        imports {
+            mavenBom org.springframework.boot.gradle.plugin.SpringBootPlugin.BOM_COORDINATES
+        }
+    }
+
+    dependencies {
+        // Gradle 9 no longer provides the JUnit Platform launcher itself; the Spring Boot BOM manages its version.
+        testRuntimeOnly 'org.junit.platform:junit-platform-launcher'
+    }
+
+    tasks.withType(Test).configureEach {
+        useJUnitPlatform()
     }
 }

@@ -1,5 +1,10 @@
 package de.tum.cit.artemis.push.common;
 
+import io.micrometer.core.instrument.Counter;
+import io.micrometer.core.instrument.MeterRegistry;
+import io.micrometer.core.instrument.binder.jvm.ExecutorServiceMetrics;
+
+import java.util.List;
 import java.util.concurrent.ArrayBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadFactory;
@@ -47,6 +52,19 @@ public class BoundedSendExecutor {
 
     private final ThreadPoolExecutor executor;
 
+    // Counts requests answered with 503 because the queue was full / because the safety timeout fired. Both are no-ops
+    // when no MeterRegistry was supplied.
+    private final Runnable onRejected;
+
+    private final Runnable onTimeout;
+
+    /**
+     * Builds a dispatcher without metrics. See {@link #BoundedSendExecutor(String, int, int, long, MeterRegistry)}.
+     */
+    public BoundedSendExecutor(String name, int workers, int queueCapacity, long responseTimeoutMillis) {
+        this(name, workers, queueCapacity, responseTimeoutMillis, null);
+    }
+
     /**
      * @param name                  a short name used for thread names and log messages (e.g. "apns")
      * @param workers               the fixed number of worker threads (== max concurrent provider calls)
@@ -55,8 +73,11 @@ public class BoundedSendExecutor {
      * @param responseTimeoutMillis how long the HTTP connection is held open before the deferred result completes
      *                              with {@code 503}; the worker is not interrupted and simply finds the result
      *                              already completed when it eventually runs
+     * @param meterRegistry         optional; when set, the pool's queue depth / active threads (standard
+     *                              {@code executor.*} meters) and the {@code hermes.send.rejected} and
+     *                              {@code hermes.send.timeouts} counters are published, tagged with the provider name
      */
-    public BoundedSendExecutor(String name, int workers, int queueCapacity, long responseTimeoutMillis) {
+    public BoundedSendExecutor(String name, int workers, int queueCapacity, long responseTimeoutMillis, MeterRegistry meterRegistry) {
         if (workers < 1) {
             throw new IllegalArgumentException("workers must be >= 1, was " + workers);
         }
@@ -69,6 +90,32 @@ public class BoundedSendExecutor {
         // when both the workers and the queue are saturated, AbortPolicy throws RejectedExecutionException.
         this.executor = new ThreadPoolExecutor(workers, workers, 0L, TimeUnit.MILLISECONDS, new ArrayBlockingQueue<>(queueCapacity), namedThreadFactory(name),
                 new ThreadPoolExecutor.AbortPolicy());
+
+        if (meterRegistry != null) {
+            new ExecutorServiceMetrics(executor, name, List.of()).bindTo(meterRegistry);
+            Counter rejected = Counter.builder("hermes.send.rejected").tag("provider", name)
+                    .description("Requests rejected with 503 because the worker pool and its queue were saturated").register(meterRegistry);
+            Counter timeouts = Counter.builder("hermes.send.timeouts").tag("provider", name)
+                    .description("Requests answered with 503 because the response timeout fired before the send completed").register(meterRegistry);
+            this.onRejected = rejected::increment;
+            this.onTimeout = timeouts::increment;
+        }
+        else {
+            this.onRejected = () -> {
+            };
+            this.onTimeout = () -> {
+            };
+        }
+    }
+
+    /**
+     * @param response the response to complete with
+     * @return an already-completed {@link DeferredResult}, for requests that are answered without any send
+     */
+    public static DeferredResult<ResponseEntity<Void>> completed(ResponseEntity<Void> response) {
+        DeferredResult<ResponseEntity<Void>> deferred = new DeferredResult<>();
+        deferred.setResult(response);
+        return deferred;
     }
 
     /**
@@ -87,7 +134,10 @@ public class BoundedSendExecutor {
      * @return the deferred HTTP response
      */
     public DeferredResult<ResponseEntity<Void>> submit(Supplier<ResponseEntity<Void>> task) {
-        DeferredResult<ResponseEntity<Void>> deferred = new DeferredResult<>(responseTimeoutMillis, () -> SERVICE_UNAVAILABLE);
+        DeferredResult<ResponseEntity<Void>> deferred = new DeferredResult<>(responseTimeoutMillis, () -> {
+            onTimeout.run();
+            return SERVICE_UNAVAILABLE;
+        });
         try {
             executor.execute(() -> {
                 // The HTTP response may already have been completed by the safety timeout while this task waited
@@ -111,6 +161,7 @@ public class BoundedSendExecutor {
         }
         catch (RejectedExecutionException e) {
             log.warn("[{}] worker pool saturated (queue full); rejecting with 503", name);
+            onRejected.run();
             deferred.setResult(SERVICE_UNAVAILABLE);
         }
         return deferred;

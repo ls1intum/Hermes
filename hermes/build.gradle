@@ -1,23 +1,13 @@
 plugins {
-    id 'java'
     id 'org.springframework.boot'
-    id 'io.spring.dependency-management'
-}
-
-group = 'de.tum.cit.aet.artemis.push'
-version = '1.0.0'
-
-java {
-    sourceCompatibility = JavaVersion.VERSION_25
-    targetCompatibility = JavaVersion.VERSION_25
-}
-
-repositories {
-    mavenCentral()
 }
 
 dependencies {
     implementation 'org.springframework.boot:spring-boot-starter-web'
+    implementation 'org.springframework.boot:spring-boot-starter-validation'
+    // Metrics only: exposed in Prometheus format on a separate management port (see application.properties).
+    implementation 'org.springframework.boot:spring-boot-starter-actuator'
+    runtimeOnly 'io.micrometer:micrometer-registry-prometheus'
 
     implementation(project(":common"))
     implementation(project(":apns"))
@@ -26,10 +16,6 @@ dependencies {
     testImplementation 'org.springframework.boot:spring-boot-starter-test'
     // Spring Boot 4 modularized the test slices; MockMvc auto-configuration lives here now.
     testImplementation 'org.springframework.boot:spring-boot-webmvc-test'
-}
-
-tasks.named('test') {
-    useJUnitPlatform()
 }
 
 springBoot {
