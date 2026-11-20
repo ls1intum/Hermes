@@ -1,0 +1,15 @@
+# Keep the build context small and keep secrets out of image layers.
+.git
+.github
+.gradle
+.idea
+**/build
+**/.gradle
+*.md
+*.png
+docker-compose.yml
+.env
+example.env
+**/*.p8
+**/*.pem
+secrets

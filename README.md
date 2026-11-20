@@ -34,3 +34,33 @@ To run the services as a Firebase relay the following Environment Variable is re
 Furthermore the Firebase.json needs to be mounted into the Docker under the above specified path.
 
 To run both APNS and Firebase configure the Environment Variables for both.
+
+### Running as a non-root user
+
+The container runs as the unprivileged user `hermes` (uid/gid 10001). The mounted APNs signing key and Firebase credentials therefore have to be **readable by uid 10001**, for example:
+
+```bash
+sudo chown 10001:10001 /opt/hermes/AuthKey_<apns_key_id>.p8 /opt/hermes/artemis.json
+sudo chmod 400 /opt/hermes/AuthKey_<apns_key_id>.p8 /opt/hermes/artemis.json
+```
+
+Keys that are only readable by root (e.g. `-rw------- root root`) make the relay start unhealthy ("Could not init APNS service" / "Exception while loading Firebase credentials" in the log). The image has a Docker `HEALTHCHECK` on `/api/push_notification/alive`.
+
+### Image tags and rollback
+
+Every build of `main` is published as `latest`, as `main` and as an immutable `sha-<short commit>` tag (e.g. `ghcr.io/ls1intum/hermes:sha-d6226b1`). Deploy a `sha-...` tag to pin an exact build; to roll back, deploy the `sha-...` tag of the previous good build again.
+
+### Optional APNs settings
+
+All of these can also be set via environment variables (e.g. `apns.alert-priority` -> `APNS_ALERT_PRIORITY`); defaults are in `hermes/src/main/resources/application.properties`:
+- `apns.topic` - the app's bundle identifier (default `de.tum.cit.ase.artemis`)
+- `apns.expiration-days` - how long APNs retries delivery to an offline device (default 7)
+- `apns.alert-priority` - delivery priority of visible notifications, `10` (immediately) or `5` (may be delayed to save power; default 5). Background notifications always use 5.
+
+### Metrics
+
+Queue depth and active workers per provider (`executor_queued_tasks`, `executor_active_threads`) as well as the number of requests answered with 503 because the queue was full (`hermes_send_rejected_total`) or the response timeout fired (`hermes_send_timeouts_total`) are exposed in Prometheus format at `/actuator/prometheus` on the **management port 8081**. That port is not published by `docker-compose.yml`, so it is not reachable through the public relay port; scrape it from the Docker network (e.g. a Prometheus container in the same compose network) or publish it to localhost only (`127.0.0.1:8081:8081`).
+
+### Request validation
+
+`send_apns` and `send_firebase` answer `400 Bad Request` when `initializationVector`, `payloadCipherText` or `token` is missing or blank (`apiType` is optional because Android requests do not carry it).

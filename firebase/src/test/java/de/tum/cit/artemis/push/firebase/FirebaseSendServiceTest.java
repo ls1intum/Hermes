@@ -97,12 +97,12 @@ class FirebaseSendServiceTest {
     }
 
     @Test
-    void isANoOpWhenNoFirebaseCredentialsArePresent() {
+    void answersServiceUnavailableWhenNoFirebaseCredentialsArePresent() {
         FirebaseSendService service = new FirebaseSendService(Optional.empty());
 
         ResponseEntity<Void> response = body(service.send(requests(3)));
 
-        assertThat(response.getStatusCode()).isEqualTo(HttpStatus.OK);
+        assertThat(response.getStatusCode()).as("a dropped notification must not be reported as delivered").isEqualTo(HttpStatus.SERVICE_UNAVAILABLE);
         assertThat(service.isHealthy()).isFalse();
     }
 

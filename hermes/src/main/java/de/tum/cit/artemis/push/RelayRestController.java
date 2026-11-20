@@ -4,6 +4,7 @@ import de.tum.cit.artemis.push.apns.ApnsSendService;
 import de.tum.cit.artemis.push.common.NotificationRequest;
 import de.tum.cit.artemis.push.firebase.FirebaseSendPushNotificationsRequest;
 import de.tum.cit.artemis.push.firebase.FirebaseSendService;
+import jakarta.validation.Valid;
 import org.springframework.http.ResponseEntity;
 import org.springframework.web.bind.annotation.GetMapping;
 import org.springframework.web.bind.annotation.PostMapping;
@@ -29,12 +30,12 @@ public class RelayRestController {
     // relayed on a bounded worker pool. The HTTP connection stays open until the send completes or the safety
     // timeout fires (then 503). This is what keeps a provider outage from starving the /api/health endpoint.
     @PostMapping("send_firebase")
-    public DeferredResult<ResponseEntity<Void>> send(@RequestBody FirebaseSendPushNotificationsRequest notificationRequests) {
+    public DeferredResult<ResponseEntity<Void>> send(@Valid @RequestBody FirebaseSendPushNotificationsRequest notificationRequests) {
         return firebaseSendService.send(notificationRequests.notificationRequest());
     }
 
     @PostMapping("send_apns")
-    public DeferredResult<ResponseEntity<Void>> send(@RequestBody NotificationRequest notificationRequest) {
+    public DeferredResult<ResponseEntity<Void>> send(@Valid @RequestBody NotificationRequest notificationRequest) {
         return apnsSendService.send(notificationRequest);
     }
 

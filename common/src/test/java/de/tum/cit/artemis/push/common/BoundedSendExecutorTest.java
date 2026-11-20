@@ -7,6 +7,7 @@ import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicBoolean;
 
+import io.micrometer.core.instrument.simple.SimpleMeterRegistry;
 import org.junit.jupiter.api.Test;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -108,6 +109,41 @@ class BoundedSendExecutorTest {
         finally {
             executor.shutdown();
         }
+    }
+
+    @Test
+    void publishesQueueDepthAndRejectionMetrics() throws InterruptedException {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        BoundedSendExecutor executor = new BoundedSendExecutor("test", 1, 1, 60_000, registry);
+        CountDownLatch workerStarted = new CountDownLatch(1);
+        CountDownLatch release = new CountDownLatch(1);
+        try {
+            executor.submit(() -> {
+                workerStarted.countDown();
+                awaitQuietly(release);
+                return OK;
+            });
+            assertThat(workerStarted.await(5, TimeUnit.SECONDS)).isTrue();
+            executor.submit(() -> OK); // fills the single queue slot
+            executor.submit(() -> OK); // rejected
+
+            assertThat(registry.get("executor.queued").tag("name", "test").gauge().value()).isEqualTo(1.0);
+            assertThat(registry.get("executor.active").tag("name", "test").gauge().value()).isEqualTo(1.0);
+            assertThat(registry.get("hermes.send.rejected").tag("provider", "test").counter().count()).isEqualTo(1.0);
+            assertThat(registry.get("hermes.send.timeouts").tag("provider", "test").counter().count()).isZero();
+        }
+        finally {
+            release.countDown();
+            executor.shutdown();
+        }
+    }
+
+    @Test
+    void completedReturnsAnAlreadyCompletedDeferredResult() {
+        DeferredResult<ResponseEntity<Void>> deferred = BoundedSendExecutor.completed(OK);
+
+        assertThat(deferred.hasResult()).isTrue();
+        assertThat(deferred.getResult()).isEqualTo(OK);
     }
 
     @Test

@@ -1,4 +1,12 @@
 package de.tum.cit.artemis.push.common;
 
-public record NotificationRequest(String initializationVector, String payloadCipherText, String token, PushNotificationApiType apiType) {
+import jakarta.validation.constraints.NotBlank;
+
+/**
+ * A single encrypted push notification to relay.
+ *
+ * <p>{@code apiType} is intentionally not validated: only the APNs relay uses it, so Android (Firebase) requests may
+ * omit it.
+ */
+public record NotificationRequest(@NotBlank String initializationVector, @NotBlank String payloadCipherText, @NotBlank String token, PushNotificationApiType apiType) {
 }

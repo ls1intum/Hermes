@@ -11,10 +11,12 @@ import com.google.firebase.messaging.MessagingErrorCode;
 import de.tum.cit.artemis.push.common.BoundedSendExecutor;
 import de.tum.cit.artemis.push.common.NotificationRequest;
 import de.tum.cit.artemis.push.common.SendService;
+import io.micrometer.core.instrument.MeterRegistry;
 import jakarta.annotation.PostConstruct;
 import jakarta.annotation.PreDestroy;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.beans.factory.annotation.Value;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
@@ -65,6 +67,8 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
 
     private BoundedSendExecutor dispatcher;
 
+    private MeterRegistry meterRegistry;
+
     public FirebaseSendService() {
         this(loadDefaultFirebaseApp());
     }
@@ -76,9 +80,15 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
         this.isConnected = firebaseApp.isPresent();
     }
 
+    // Optional: absent when metrics are not on the classpath (e.g. in plain unit tests).
+    @Autowired(required = false)
+    void setMeterRegistry(MeterRegistry meterRegistry) {
+        this.meterRegistry = meterRegistry;
+    }
+
     @PostConstruct
     public void init() {
-        dispatcher = new BoundedSendExecutor("firebase", workers, queueCapacity, responseTimeoutMs);
+        dispatcher = new BoundedSendExecutor("firebase", workers, queueCapacity, responseTimeoutMs, meterRegistry);
     }
 
     private static Optional<FirebaseApp> loadDefaultFirebaseApp() {
@@ -99,15 +109,17 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
     @Override
     public DeferredResult<ResponseEntity<Void>> send(List<NotificationRequest> requests) {
         if (requests.size() > MAX_BATCH_SIZE) {
-            return completed(ResponseEntity.status(HttpStatus.BAD_REQUEST).build());
+            return BoundedSendExecutor.completed(ResponseEntity.status(HttpStatus.BAD_REQUEST).build());
         }
-        // If the firebase app is not present, there is nothing to send; mirror the previous no-op success.
+        // Without credentials nothing can be sent. Answer 503 (retryable, and consistent with the unhealthy flag) instead
+        // of a 200 that would make the caller believe the notifications were delivered.
         if (firebaseApp.isEmpty()) {
-            return completed(ResponseEntity.ok().build());
+            log.error("Dropping {} Firebase notification(s): Firebase is not configured (GOOGLE_APPLICATION_CREDENTIALS)", requests.size());
+            return BoundedSendExecutor.completed(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build());
         }
         if (dispatcher == null) {
             // Should not happen once the bean is initialized, but stay defensive rather than NPE.
-            return completed(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build());
+            return BoundedSendExecutor.completed(ResponseEntity.status(HttpStatus.SERVICE_UNAVAILABLE).build());
         }
         return dispatcher.submit(() -> doSend(requests));
     }
@@ -187,11 +199,5 @@ public class FirebaseSendService implements SendService<List<NotificationRequest
         // FirebaseApp.initializeApp registers a global default app; delete it so resources are released and a
         // same-JVM restart does not fail with "FirebaseApp name [DEFAULT] already exists".
         firebaseApp.ifPresent(FirebaseApp::delete);
-    }
-
-    private static DeferredResult<ResponseEntity<Void>> completed(ResponseEntity<Void> response) {
-        DeferredResult<ResponseEntity<Void>> deferred = new DeferredResult<>();
-        deferred.setResult(response);
-        return deferred;
     }
 }

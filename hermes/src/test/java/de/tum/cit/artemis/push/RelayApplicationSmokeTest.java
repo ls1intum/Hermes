@@ -25,6 +25,7 @@ import static org.assertj.core.api.Assertions.assertThat;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.verifyNoInteractions;
 import static org.mockito.Mockito.when;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.asyncDispatch;
 import static org.springframework.test.web.servlet.request.MockMvcRequestBuilders.get;
@@ -135,6 +136,70 @@ class RelayApplicationSmokeTest {
         assertThat(captor.getValue()).hasSize(2);
         assertThat(captor.getValue().get(0).token()).isEqualTo("t1");
         assertThat(captor.getValue().get(1).apiType()).isEqualTo(PushNotificationApiType.IOS_V2);
+    }
+
+    @Test
+    void sendApnsRejectsBlankFieldsWithBadRequest() throws Exception {
+        String body = """
+                {"initializationVector":"iv","payloadCipherText":"cipher","token":" ","apiType":"IOS_V2"}""";
+
+        mockMvc.perform(post("/api/push_notification/send_apns")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(apnsSendService);
+    }
+
+    @Test
+    void sendApnsRejectsMissingFieldsWithBadRequest() throws Exception {
+        mockMvc.perform(post("/api/push_notification/send_apns")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(apnsSendService);
+    }
+
+    @Test
+    void sendFirebaseRejectsInvalidBatchEntriesWithBadRequest() throws Exception {
+        String body = """
+                {"notificationRequest":[
+                  {"initializationVector":"iv1","payloadCipherText":"c1","token":"t1"},
+                  {"initializationVector":"iv2","payloadCipherText":"c2","token":""}
+                ]}""";
+
+        mockMvc.perform(post("/api/push_notification/send_firebase")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(firebaseSendService);
+    }
+
+    @Test
+    void sendFirebaseRejectsMissingBatchWithBadRequest() throws Exception {
+        mockMvc.perform(post("/api/push_notification/send_firebase")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content("{}"))
+                .andExpect(status().isBadRequest());
+
+        verifyNoInteractions(firebaseSendService);
+    }
+
+    @Test
+    void sendFirebaseAcceptsEntriesWithoutApiType() throws Exception {
+        // Android requests carry no apiType; it must stay optional.
+        when(firebaseSendService.send(anyList())).thenReturn(deferred(HttpStatus.OK));
+        String body = """
+                {"notificationRequest":[{"initializationVector":"iv1","payloadCipherText":"c1","token":"t1"}]}""";
+
+        MvcResult mvcResult = mockMvc.perform(post("/api/push_notification/send_firebase")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(body))
+                .andReturn();
+        mockMvc.perform(asyncDispatch(mvcResult))
+                .andExpect(status().isOk());
     }
 
     /** Builds an already-completed DeferredResult, mirroring what the (now asynchronous) send services return. */

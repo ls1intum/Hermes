@@ -14,7 +14,7 @@ on:
           - production
           - staging
       hermes_version:
-        description: 'Docker tag to deploy (hermes_version)'
+        description: 'Docker tag to deploy (hermes_version), e.g. latest or an immutable sha-<short commit> tag (also for rollbacks)'
         type: string
         required: true
 
