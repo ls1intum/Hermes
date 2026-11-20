@@ -40,7 +40,9 @@ RUN modules="$(/opt/java/jdk/bin/jdeps --ignore-missing-deps --multi-release 25 
         --output /opt/java/jre
 
 FROM docker.io/library/ubuntu:26.04
-# Run as an unprivileged user. The mounted APNs signing key and Firebase credentials must be readable by uid 10001.
+# An unprivileged user for hardened setups. The image still starts as root by default, because existing deployments
+# mount key files that are only readable by root. To run unprivileged, make the mounted APNs signing key and Firebase
+# credentials readable by uid 10001 and start the container with `user: "10001:10001"` (see README).
 RUN groupadd --system --gid 10001 hermes \
     && useradd --system --uid 10001 --gid 10001 --no-create-home --shell /usr/sbin/nologin hermes
 ENV JAVA_HOME=/opt/java/jre
@@ -48,11 +50,11 @@ ENV PATH="${JAVA_HOME}/bin:${PATH}"
 COPY --from=jre /opt/java/jre /opt/java/jre
 WORKDIR /app
 COPY --from=builder /extracted/ /app/
-USER 10001:10001
 
 EXPOSE 8080
-# Plain bash (no curl in the image): GET the liveness endpoint and expect a 200 status line.
+# Plain bash (no curl in the image): GET the liveness endpoint and expect a 200 status line. Note that this only
+# proves the process is up; use /api/health to see whether APNs and Firebase are actually connected.
 HEALTHCHECK --interval=30s --timeout=5s --start-period=30s --retries=3 \
-    CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/8080 && printf 'GET /api/push_notification/alive HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
+    CMD ["bash", "-c", "exec 3<>/dev/tcp/127.0.0.1/${SERVER_PORT:-8080} && printf 'GET /api/push_notification/alive HTTP/1.0\\r\\nHost: localhost\\r\\n\\r\\n' >&3 && head -n 1 <&3 | grep -q ' 200 '"]
 
 ENTRYPOINT ["java", "-jar", "/app/hermes-1.0.0.jar"]

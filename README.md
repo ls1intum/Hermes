@@ -35,20 +35,20 @@ Furthermore the Firebase.json needs to be mounted into the Docker under the abov
 
 To run both APNS and Firebase configure the Environment Variables for both.
 
-### Running as a non-root user
+### Running as a non-root user (optional)
 
-The container runs as the unprivileged user `hermes` (uid/gid 10001). The mounted APNs signing key and Firebase credentials therefore have to be **readable by uid 10001**, for example:
+The image contains an unprivileged user `hermes` (uid/gid 10001) but starts as root by default, because the key files are usually only readable by root. To harden a deployment, make the mounted APNs signing key and Firebase credentials readable by uid 10001 **first**:
 
 ```bash
 sudo chown 10001:10001 /opt/hermes/AuthKey_<apns_key_id>.p8 /opt/hermes/artemis.json
 sudo chmod 400 /opt/hermes/AuthKey_<apns_key_id>.p8 /opt/hermes/artemis.json
 ```
 
-Keys that are only readable by root (e.g. `-rw------- root root`) make the relay start unhealthy ("Could not init APNS service" / "Exception while loading Firebase credentials" in the log). The image has a Docker `HEALTHCHECK` on `/api/push_notification/alive`.
+then run the container with `user: "10001:10001"` (commented out in `docker-compose.yml`). If you switch before the files are readable, the relay starts but both providers are unavailable: the log shows `Permission denied`, `/api/health` reports `isApnsConnected` and `isFirebaseConnected` as `false`, and sends return 503. Note that the Docker `HEALTHCHECK` (`/api/push_notification/alive`) only proves that the process is up, so it stays healthy in that case; check `/api/health` instead.
 
 ### Image tags and rollback
 
-Every build of `main` is published as `latest`, as `main` and as an immutable `sha-<short commit>` tag (e.g. `ghcr.io/ls1intum/hermes:sha-d6226b1`). Deploy a `sha-...` tag to pin an exact build; to roll back, deploy the `sha-...` tag of the previous good build again.
+Builds of `main` are published as `latest`, as `main` and, since the `sha-` tag was introduced, as an immutable `sha-<short commit>` tag. Deploy a `sha-...` tag to pin an exact build; to roll back, deploy the `sha-...` tag of the previous good build again. Only builds made after this tag was introduced have one.
 
 ### Optional APNs settings
 
@@ -59,8 +59,8 @@ All of these can also be set via environment variables (e.g. `apns.alert-priorit
 
 ### Metrics
 
-Queue depth and active workers per provider (`executor_queued_tasks`, `executor_active_threads`) as well as the number of requests answered with 503 because the queue was full (`hermes_send_rejected_total`) or the response timeout fired (`hermes_send_timeouts_total`) are exposed in Prometheus format at `/actuator/prometheus` on the **management port 8081**. That port is not published by `docker-compose.yml`, so it is not reachable through the public relay port; scrape it from the Docker network (e.g. a Prometheus container in the same compose network) or publish it to localhost only (`127.0.0.1:8081:8081`).
+Queue depth and active workers per provider (`executor_queued_tasks`, `executor_active_threads`) as well as the number of requests answered with 503 because the queue was full (`hermes_send_rejected_total`) or the response timeout fired (`hermes_send_timeouts_total`) are exposed in Prometheus format at `/actuator/prometheus` on the **management port 8081**. That port is not published by `docker-compose.yml`, so it is not reachable through the public relay port; change it with `MANAGEMENT_SERVER_PORT` (the relay does not start if the port is already in use; this matters for host networking only), and scrape it from the Docker network (e.g. a Prometheus container in the same compose network) or publish it to localhost only (`127.0.0.1:8081:8081`).
 
 ### Request validation
 
-`send_apns` and `send_firebase` answer `400 Bad Request` when `initializationVector`, `payloadCipherText` or `token` is missing or blank (`apiType` is optional because Android requests do not carry it).
+`send_apns` and `send_firebase` answer `400 Bad Request` when `initializationVector`, `payloadCipherText` or `token` is missing or empty (`apiType` is not validated).

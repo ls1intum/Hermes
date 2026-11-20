@@ -139,9 +139,9 @@ class RelayApplicationSmokeTest {
     }
 
     @Test
-    void sendApnsRejectsBlankFieldsWithBadRequest() throws Exception {
+    void sendApnsRejectsEmptyFieldsWithBadRequest() throws Exception {
         String body = """
-                {"initializationVector":"iv","payloadCipherText":"cipher","token":" ","apiType":"IOS_V2"}""";
+                {"initializationVector":"iv","payloadCipherText":"cipher","token":"","apiType":"IOS_V2"}""";
 
         mockMvc.perform(post("/api/push_notification/send_apns")
                         .contentType(MediaType.APPLICATION_JSON)
